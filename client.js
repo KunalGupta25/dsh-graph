@@ -635,7 +635,93 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * Toolbar Launcher Button docked into DSH Composer or Shell
+     * Sidebar Navigation Row for DeepSeek Harness Left Sidebar
+     */
+    function WorkflowStudioSidebarItem() {
+      const [isOpen, setIsOpen] = useState(false);
+      const [isHovered, setIsHovered] = useState(false);
+
+      return h(React.Fragment, null,
+        h('div', {
+          onClick: () => setIsOpen(true),
+          onMouseEnter: () => setIsHovered(true),
+          onMouseLeave: () => setIsHovered(false),
+          title: 'Workflow Studio - Visual Cordis Node Editor',
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '8px 12px',
+            margin: '2px 8px',
+            borderRadius: 8,
+            cursor: 'pointer',
+            backgroundColor: isHovered ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
+            color: isHovered ? '#ffffff' : '#cbd5e1',
+            fontSize: 13,
+            fontWeight: 500,
+            transition: 'background-color 0.15s ease'
+          }
+        },
+          // Workflow Graph Node Icon
+          h('svg', {
+            width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none',
+            stroke: isHovered ? '#38bdf8' : '#94a3b8', strokeWidth: 2,
+            strokeLinecap: 'round', strokeLinejoin: 'round'
+          },
+            h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1 }),
+            h('rect', { x: 15, y: 3, width: 6, height: 6, rx: 1 }),
+            h('rect', { x: 9, y: 15, width: 6, height: 6, rx: 1 }),
+            h('path', { d: 'M6 9v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9' }),
+            h('path', { d: 'M12 13v2' })
+          ),
+          h('span', null, 'Workflow Studio')
+        ),
+        h(WorkflowStudioApp, { isOpen, onClose: () => setIsOpen(false) })
+      );
+    }
+
+    /**
+     * Floating Quick-Access Pill (Always visible across pages)
+     */
+    function WorkflowStudioFloatingPill() {
+      const [isOpen, setIsOpen] = useState(false);
+      const [isHovered, setIsHovered] = useState(false);
+
+      return h(React.Fragment, null,
+        h('div', {
+          onClick: () => setIsOpen(true),
+          onMouseEnter: () => setIsHovered(true),
+          onMouseLeave: () => setIsHovered(false),
+          title: 'Open DSH Workflow Studio',
+          style: {
+            position: 'fixed',
+            bottom: '24px',
+            right: '24px',
+            zIndex: 9000,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '9px 16px',
+            borderRadius: '24px',
+            backgroundColor: isHovered ? '#0284c7' : '#0ea5e9',
+            color: '#ffffff',
+            fontSize: '13px',
+            fontWeight: 600,
+            boxShadow: '0 4px 14px rgba(14, 165, 233, 0.4)',
+            cursor: 'pointer',
+            transition: 'all 0.18s ease',
+            transform: isHovered ? 'scale(1.04)' : 'scale(1)'
+          }
+        },
+          h('span', { style: { fontSize: '14px' } }, '⚡'),
+          h('span', null, 'Workflow Studio')
+        ),
+        h(WorkflowStudioApp, { isOpen, onClose: () => setIsOpen(false) })
+      );
+    }
+
+    /**
+     * Toolbar Launcher Button docked into DSH Composer
      */
     function WorkflowStudioLauncher() {
       const [isOpen, setIsOpen] = useState(false);
@@ -668,7 +754,28 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        // Register launcher into composer dock
+        // 1. Primary Left Sidebar Navigation
+        ctx.slots.inject('sidebar.entry', () => ctx.slots.register({
+          name: 'sidebar.entry',
+          id: 'workflow-studio-sidebar',
+          order: 12
+        }, WorkflowStudioSidebarItem));
+
+        // 2. Sidebar action list fallback
+        ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({
+          name: 'sidebar.panellist.actions',
+          id: 'workflow-studio-sidebar-action',
+          order: 12
+        }, WorkflowStudioSidebarItem));
+
+        // 3. Floating Overlay launcher (visible across any page)
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'workflow-studio-pill',
+          order: 100
+        }, WorkflowStudioFloatingPill));
+
+        // 4. Conversation Composer Dock (visible inside active chat sessions)
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock',
           id: 'workflow-studio-launcher',
