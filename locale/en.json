@@ -1,0 +1,29 @@
+{
+  "meta": {
+    "title": "Workflow Studio",
+    "description": "Visual Cordis workflow studio for DeepSeek Harness: inspect active plugins as nodes, connect skills and MCPs, browse community marketplaces, and scaffold plugins with an AI copilot.",
+    "detail": "docs/DETAIL.md"
+  },
+  "ui": {
+    "tabTitle": "Workflow Studio",
+    "stageChanges": "Stage changes",
+    "applyPatch": "Apply patch",
+    "discard": "Discard",
+    "nodes": {
+      "core": "Core service",
+      "preset": "Agent preset",
+      "hostPlugin": "Host plugin",
+      "uiPlugin": "UI plugin",
+      "mcp": "MCP server",
+      "skill": "Skill",
+      "locked": "Read-only system plugin",
+      "editable": "Editable composition"
+    },
+    "copilot": {
+      "title": "Studio Copilot",
+      "askPlaceholder": "Ask anything about active plugins, tools, or dependencies...",
+      "createPlugin": "Create plugin",
+      "marketplace": "Marketplace"
+    }
+  }
+}

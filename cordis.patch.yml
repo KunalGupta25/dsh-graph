@@ -1,0 +1,6 @@
+- insert:
+    - id: dsh-workflow-studio
+      name: '@local/dsh-workflow-studio'
+      config:
+        enabled: true
+        allowLiveApply: true

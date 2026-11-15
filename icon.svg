@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none">
+  <!-- Workflow Connection Curve -->
+  <path d="M10 12C14 12 14 24 18 24C22 24 22 18 26 18" stroke="#0ea5e9" stroke-width="2" stroke-linecap="round"/>
+  <!-- Branch Curve -->
+  <path d="M18 24C22 24 22 27 26 27" stroke="#6366f1" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="2 2"/>
+  
+  <!-- Source Node (Amber / Preset) -->
+  <rect x="7" y="9" width="6" height="6" rx="1.5" fill="#f59e0b" stroke="#d97706" stroke-width="1.2"/>
+  
+  <!-- Intermediate Node (Blue / Core Service) -->
+  <circle cx="18" cy="24" r="3" fill="#247bbf" stroke="#1d4ed8" stroke-width="1.2"/>
+  
+  <!-- Target Node 1 (Teal / Tool) -->
+  <rect x="23" y="15" width="6" height="6" rx="1.5" fill="#10b981" stroke="#059669" stroke-width="1.2"/>
+  
+  <!-- Target Node 2 (Indigo / MCP) -->
+  <circle cx="26" cy="27" r="2.2" fill="#818cf8" stroke="#4f46e5" stroke-width="1"/>
+</svg>

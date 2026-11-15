@@ -1,0 +1,29 @@
+{
+  "meta": {
+    "title": "工作流工作台",
+    "description": "DeepSeek Harness 可视化 Cordis 工作流工作台：以节点形式查看和编排插件、连接技能与 MCP、浏览插件市场并使用 AI Copilot 脚手架创建新插件。",
+    "detail": "docs/DETAIL.zh.md"
+  },
+  "ui": {
+    "tabTitle": "工作流工作台",
+    "stageChanges": "暂存更改",
+    "applyPatch": "应用补丁",
+    "discard": "放弃",
+    "nodes": {
+      "core": "核心服务",
+      "preset": "智能体预设",
+      "hostPlugin": "宿主插件",
+      "uiPlugin": "界面插件",
+      "mcp": "MCP 服务",
+      "skill": "技能",
+      "locked": "只读系统插件",
+      "editable": "可编辑编排"
+    },
+    "copilot": {
+      "title": "工作台助手",
+      "askPlaceholder": "询问有关插件、工具或依赖关系的任何问题...",
+      "createPlugin": "创建插件",
+      "marketplace": "插件市场"
+    }
+  }
+}

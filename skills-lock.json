@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "skills": {
+    "cordis-plugin-development": {
+      "source": "deepseek-ai/deepseek-harness",
+      "sourceType": "github",
+      "skillPath": "packages/preset/agent-preset/skills/dsh-doc/SKILL.md",
+      "computedHash": "85fce40c8072ecf821ca92d5c596cc28c0ffa2b63fbd7098e3d47926f05bda29"
+    },
+    "dsh-doc": {
+      "source": "deepseek-ai/deepseek-harness",
+      "sourceType": "github",
+      "skillPath": "packages/preset/agent-preset/skills/dsh-doc/SKILL.md",
+      "computedHash": "85fce40c8072ecf821ca92d5c596cc28c0ffa2b63fbd7098e3d47926f05bda29"
+    },
+    "gravitas": {
+      "source": "udaysharmadev/Gravitas",
+      "sourceType": "github",
+      "skillPath": "skills/gravitas/SKILL.md",
+      "computedHash": "5e25a663f10ba342216cbc68044f5b74aada957d5fb0755cc46978ccfa62a292"
+    },
+    "gravitas-highstakes": {
+      "source": "udaysharmadev/Gravitas",
+      "sourceType": "github",
+      "skillPath": "skills/gravitas-highstakes/SKILL.md",
+      "computedHash": "c4db06085e6b6de0d6dc2e26fff3b5f99272c079749044f39f2494c2765f180a"
+    },
+    "gravitas-python": {
+      "source": "udaysharmadev/Gravitas",
+      "sourceType": "github",
+      "skillPath": "skills/gravitas-python/SKILL.md",
+      "computedHash": "c0931328d16d2c51f0940d053b794c86d91d15f5402725e321c37a12f3206b40"
+    },
+    "gravitas-typescript": {
+      "source": "udaysharmadev/Gravitas",
+      "sourceType": "github",
+      "skillPath": "skills/gravitas-typescript/SKILL.md",
+      "computedHash": "287c03f5aafadba852a23e200ce0332f52262a823539cae1accb8f77f1f74f8c"
+    },
+    "rextend": {
+      "source": "KunalGupta25/ReXtend",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "127f6a5ae856f4255ca27833c026476b4d93f6822ddb85d7a49e61297396b6b8"
+    }
+  }
+}
