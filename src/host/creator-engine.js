@@ -75,6 +75,19 @@ export function apply(ctx, config) {
       },
       required: ['input']
     },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          status: { type: 'string' },
+          result: { type: 'string' }
+        }
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: value?.result || String(value?.status)
+      }]
+    },
     async execute(args) {
       return {
         status: 'success',

@@ -62,6 +62,21 @@ export function apply(ctx, config) {
       name: 'dsh_workflow_studio_graph',
       description: 'Inspects all active plugins, core services, agent presets, skills, and MCP clients in DeepSeek Harness as a node graph.',
       parameters: { type: 'object', properties: {} },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            nodesCount: { type: 'number' },
+            edgesCount: { type: 'number' },
+            nodes: { type: 'array' },
+            edges: { type: 'array' }
+          }
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: `DSH Workflow Graph: ${value?.nodesCount || 0} active nodes, ${value?.edgesCount || 0} edges.`
+        }]
+      },
       async execute() {
         const graph = await studio.getGraph();
         return {
@@ -83,6 +98,18 @@ export function apply(ctx, config) {
           category: { type: 'string', enum: ['all', 'tools', 'mcp', 'skills', 'data'], description: 'Category filter' }
         }
       },
+      output: {
+        schema: {
+          type: 'array',
+          items: { type: 'object' }
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: Array.isArray(value) && value.length > 0
+            ? `Found ${value.length} marketplace item(s):\n` + value.map(i => `- ${i.title || i.name} [${i.type}]`).join('\n')
+            : 'No matching marketplace items found.'
+        }]
+      },
       async execute(args) {
         return await studio.searchMarketplace(args.query || '', args.category || 'all');
       }
@@ -100,6 +127,21 @@ export function apply(ctx, config) {
           description: { type: 'string', description: 'What the plugin does' }
         },
         required: ['name', 'type', 'title']
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            files: { type: 'object' }
+          }
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: `Scaffolded ${value?.type} bundle '${value?.name}' with files: ${Object.keys(value?.files || {}).join(', ')}`
+        }]
       },
       async execute(args) {
         return studio.scaffoldPlugin(args);
