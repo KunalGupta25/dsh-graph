@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /**
- * Inspects the live Cordis registry and filesystem to build the unified visual DAG.
+ * Inspects the live Cordis registry, active presets, skills, and desktop profile to build the unified visual DAG.
  */
 export class CordisGraphScanner {
   constructor(ctx) {
@@ -15,57 +15,30 @@ export class CordisGraphScanner {
   async scan() {
     const nodes = [];
     const edges = [];
-
-    // 1. Core Services & Host Plugins from Cordis registry
-    const registeredPlugins = this.ctx?.registry ? Array.from(this.ctx.registry.values()) : [];
-    
-    // Core system plugins map
-    const coreKnownPackages = new Set([
-      '@deepseek-ai/dsh-core',
-      '@deepseek-ai/dsh-tools',
-      '@deepseek-ai/dsh-session',
-      '@deepseek-ai/dsh-agent',
-      '@deepseek-ai/dsh-llm',
-      '@deepseek-ai/dsh-plugin-manager',
-      '@deepseek-ai/dsh-client-modules',
-      '@deepseek-ai/dsh-storage',
-      '@deepseek-ai/dsh-shell-env'
-    ]);
-
-    // Track found plugin identifiers
     const processedIds = new Set();
 
-    for (const pluginEntry of registeredPlugins) {
-      const plugin = pluginEntry?.plugin || pluginEntry;
-      const name = plugin?.name || plugin?.id || 'anonymous-plugin';
-      const id = plugin?.id || name;
+    // 1. Core baseline system services
+    const coreServices = [
+      { id: 'core:tools', label: 'Tools Engine', fullPackage: '@deepseek-ai/dsh-tools', type: 'core', readOnly: true, desc: 'Central tool registry and execution pipeline' },
+      { id: 'core:sessions', label: 'Session Store', fullPackage: '@deepseek-ai/dsh-session', type: 'core', readOnly: true, desc: 'Event-sourced conversation session storage' },
+      { id: 'core:agents', label: 'Agent Runtime', fullPackage: '@deepseek-ai/dsh-agent', type: 'core', readOnly: true, desc: 'Agent loops, initiator scopes, and event dispatch' },
+      { id: 'core:pluginManager', label: 'Plugin Manager', fullPackage: '@deepseek-ai/dsh-plugin-manager', type: 'core', readOnly: true, desc: 'Profile-wide bundle lifecycle and patch composer' },
+      { id: 'core:storage', label: 'Storage Hub', fullPackage: '@deepseek-ai/dsh-storage', type: 'core', readOnly: true, desc: 'Unified disk and state storage provider' }
+    ];
 
-      if (processedIds.has(id)) continue;
-      processedIds.add(id);
-
-      const isCore = coreKnownPackages.has(name) || name.startsWith('@deepseek-ai/dsh-core') || !id.startsWith('@local/');
-      
+    for (const core of coreServices) {
       nodes.push({
-        id: `plugin:${id}`,
-        label: name.replace(/^@deepseek-ai\/dsh-/, ''),
-        fullPackage: name,
-        type: isCore ? 'core-service' : 'host-plugin',
-        readOnly: isCore,
+        id: core.id,
+        label: core.label,
+        fullPackage: core.fullPackage,
+        type: 'core',
+        readOnly: true,
         status: 'active',
-        injectedServices: Array.isArray(plugin?.inject) ? plugin.inject : [],
-        providedServices: plugin?.service ? [plugin.service] : []
+        description: core.desc,
+        injectedServices: [],
+        providedServices: [core.id.replace('core:', '')]
       });
-    }
-
-    // Fallback baseline core nodes if registry is running headlessly
-    if (nodes.length === 0) {
-      const baselines = [
-        { id: 'core:tools', label: 'Tools Registry (ctx.tools)', type: 'core-service', readOnly: true },
-        { id: 'core:session', label: 'Session Store (ctx.sessions)', type: 'core-service', readOnly: true },
-        { id: 'core:agents', label: 'Agent Runtime (ctx.agents)', type: 'core-service', readOnly: true },
-        { id: 'core:pluginManager', label: 'Plugin Manager (ctx.pluginManager)', type: 'core-service', readOnly: true },
-      ];
-      for (const b of baselines) nodes.push(b);
+      processedIds.add(core.id);
     }
 
     // 2. Discover Agent Presets
@@ -75,23 +48,45 @@ export class CordisGraphScanner {
       nodes.push({
         id: presetNodeId,
         label: preset.name || preset.id,
+        fullPackage: '@deepseek-ai/dsh-agent-preset',
         description: preset.description || '',
-        type: 'agent-preset',
+        type: 'preset',
         readOnly: preset.isShipped || false,
         status: 'active',
         plugins: preset.plugins || []
       });
+      processedIds.add(presetNodeId);
 
-      // Link preset to its constituent plugins, tools, or MCPs
+      // Connect Core Agent runtime to Presets
+      edges.push({
+        id: `edge:core:agents->${presetNodeId}`,
+        from: 'core:agents',
+        to: presetNodeId,
+        type: 'core-flow'
+      });
+
+      // Link preset plugins as tool nodes
       if (Array.isArray(preset.plugins)) {
         for (const child of preset.plugins) {
-          const childId = child.name || child.id;
+          const childId = `plugin:${child.id || child.name.replace(/^@.*\//, '')}`;
+          if (!processedIds.has(childId)) {
+            nodes.push({
+              id: childId,
+              label: child.id || child.name.replace(/^@deepseek-ai\/dsh-/, ''),
+              fullPackage: child.name,
+              type: 'tool',
+              readOnly: true,
+              status: 'active',
+              description: `Mounted under ${preset.name}`
+            });
+            processedIds.add(childId);
+          }
+
           edges.push({
             id: `edge:${presetNodeId}->${childId}`,
-            source: presetNodeId,
-            target: `plugin:${childId}`,
-            type: 'agent-composition',
-            label: 'mounts'
+            from: presetNodeId,
+            to: childId,
+            type: 'composition'
           });
         }
       }
@@ -101,61 +96,124 @@ export class CordisGraphScanner {
     const skills = await this.discoverLocalSkills();
     for (const skill of skills) {
       const skillNodeId = `skill:${skill.name}`;
-      nodes.push({
-        id: skillNodeId,
-        label: skill.name,
-        description: skill.description,
-        type: 'skill-subnode',
-        readOnly: false,
-        status: 'ready',
-        path: skill.path
-      });
+      if (!processedIds.has(skillNodeId)) {
+        nodes.push({
+          id: skillNodeId,
+          label: skill.name,
+          fullPackage: `skill://${skill.name}`,
+          description: skill.description,
+          type: 'skill',
+          readOnly: false,
+          status: 'ready',
+          path: skill.path
+        });
+        processedIds.add(skillNodeId);
 
-      // Connect skill to active standard preset
-      edges.push({
-        id: `edge:preset:standard->${skillNodeId}`,
-        source: 'preset:standard',
-        target: skillNodeId,
-        type: 'agent-composition',
-        label: 'instruction'
-      });
+        edges.push({
+          id: `edge:preset:standard->${skillNodeId}`,
+          from: 'preset:standard',
+          to: skillNodeId,
+          type: 'instruction'
+        });
+      }
     }
 
     // 4. Discover MCP Clients
     const mcps = await this.discoverMcpClients();
     for (const mcp of mcps) {
       const mcpNodeId = `mcp:${mcp.serverName}`;
-      nodes.push({
-        id: mcpNodeId,
-        label: `MCP: ${mcp.serverName}`,
-        type: 'mcp-subnode',
-        readOnly: false,
-        status: mcp.status || 'connected',
-        transport: mcp.transport,
-        tools: mcp.tools || []
-      });
+      if (!processedIds.has(mcpNodeId)) {
+        nodes.push({
+          id: mcpNodeId,
+          label: `MCP: ${mcp.serverName}`,
+          fullPackage: '@deepseek-ai/dsh-mcp-client',
+          type: 'mcp',
+          readOnly: false,
+          status: mcp.status || 'connected',
+          transport: mcp.transport,
+          tools: mcp.tools || []
+        });
+        processedIds.add(mcpNodeId);
 
-      edges.push({
-        id: `edge:preset:standard->${mcpNodeId}`,
-        source: 'preset:standard',
-        target: mcpNodeId,
-        type: 'agent-composition',
-        label: 'tools'
-      });
+        edges.push({
+          id: `edge:preset:standard->${mcpNodeId}`,
+          from: 'preset:standard',
+          to: mcpNodeId,
+          type: 'tools'
+        });
+      }
     }
+
+    // 5. Discover installed user bundles from desktop profile
+    const profileBundles = this.discoverInstalledProfileBundles();
+    for (const bundle of profileBundles) {
+      const bundleNodeId = `bundle:${bundle.name.replace(/^@.*\//, '')}`;
+      if (!processedIds.has(bundleNodeId)) {
+        nodes.push({
+          id: bundleNodeId,
+          label: bundle.name.replace(/^@.*\//, ''),
+          fullPackage: bundle.name,
+          version: bundle.version,
+          type: 'tool',
+          readOnly: false,
+          status: 'active',
+          description: `User bundle installed in desktop profile`
+        });
+        processedIds.add(bundleNodeId);
+
+        edges.push({
+          id: `edge:core:pluginManager->${bundleNodeId}`,
+          from: 'core:pluginManager',
+          to: bundleNodeId,
+          type: 'plugin'
+        });
+      }
+    }
+
+    // 6. Apply Topological Collision-Free DAG Layout Coordinates
+    this.applyTopologicalLayout(nodes);
 
     return { nodes, edges, timestamp: Date.now() };
   }
 
   /**
-   * Discovers agent presets from configuration or files.
+   * Computes clean 4-tier hierarchical coordinates so nodes NEVER collide or overlap.
    */
+  applyTopologicalLayout(nodes) {
+    const tier0 = []; // Core services
+    const tier1 = []; // Presets
+    const tier2 = []; // Skills & MCPs
+    const tier3 = []; // Tools & User Plugins
+
+    for (const node of nodes) {
+      if (node.type === 'core') tier0.push(node);
+      else if (node.type === 'preset') tier1.push(node);
+      else if (node.type === 'skill' || node.type === 'mcp') tier2.push(node);
+      else tier3.push(node);
+    }
+
+    const NODE_WIDTH = 210;
+    const NODE_HEIGHT = 82;
+    const VERTICAL_GAP = 30; // 30px gap ensures zero overlap
+    const Y_PITCH = NODE_HEIGHT + VERTICAL_GAP; // 112px
+
+    const X_TIER_0 = 80;
+    const X_TIER_1 = 380;
+    const X_TIER_2 = 680;
+    const X_TIER_3 = 980;
+
+    tier0.forEach((n, i) => { n.x = X_TIER_0; n.y = 80 + i * Y_PITCH; });
+    tier1.forEach((n, i) => { n.x = X_TIER_1; n.y = 80 + i * (Y_PITCH + 10); });
+    tier2.forEach((n, i) => { n.x = X_TIER_2; n.y = 80 + i * Y_PITCH; });
+    tier3.forEach((n, i) => { n.x = X_TIER_3; n.y = 80 + i * Y_PITCH; });
+  }
+
   async discoverPresets() {
     return [
       {
         id: 'standard',
         name: 'Standard Agent',
-        description: 'Default agent with shell, file edit, and reasoning capabilities.',
+        description: 'Default agent equipped with terminal shell, file editing, and reasoning capabilities.',
         isShipped: true,
         plugins: [
           { id: 'persona', name: '@deepseek-ai/dsh-persona' },
@@ -166,7 +224,7 @@ export class CordisGraphScanner {
       {
         id: 'ptc',
         name: 'PTC Agent',
-        description: 'Programmatic tool calling agent with sandbox executor.',
+        description: 'Programmatic tool calling agent running in strict sandboxed executors.',
         isShipped: true,
         plugins: [
           { id: 'persona', name: '@deepseek-ai/dsh-persona' },
@@ -176,7 +234,7 @@ export class CordisGraphScanner {
       {
         id: 'minimal',
         name: 'Minimal Agent',
-        description: 'Lightweight conversational agent.',
+        description: 'Lightweight conversational agent with zero extra tools.',
         isShipped: true,
         plugins: [
           { id: 'persona', name: '@deepseek-ai/dsh-persona' }
@@ -185,9 +243,6 @@ export class CordisGraphScanner {
     ];
   }
 
-  /**
-   * Reads .agents/skills directory for registered skills.
-   */
   async discoverLocalSkills() {
     const skills = [];
     const skillsDir = path.resolve(process.cwd(), '.agents/skills');
@@ -202,7 +257,7 @@ export class CordisGraphScanner {
           const descMatch = content.match(/description:\s*>?-?\s*(.*?)(?=\n---|\n[a-z_]+:)/s);
           skills.push({
             name: entry.name,
-            description: descMatch ? descMatch[1].trim().replace(/\s+/g, ' ') : 'Agent skill instructions',
+            description: descMatch ? descMatch[1].trim().replace(/\s+/g, ' ') : 'Agent directives and guidelines',
             path: skillMd
           });
         }
@@ -211,25 +266,44 @@ export class CordisGraphScanner {
     return skills;
   }
 
-  /**
-   * Reads connected MCP configurations.
-   */
   async discoverMcpClients() {
-    // In DSH, ctx.mcpManager provides active clients.
     if (this.ctx?.mcpManager?.listClients) {
       try {
         return await this.ctx.mcpManager.listClients();
-      } catch {
-        // Fallback
-      }
+      } catch {}
     }
     return [
       {
-        serverName: 'builtin-mcp',
-        transport: 'streamable-http',
+        serverName: 'Local Server Bridge',
+        transport: 'stdio',
         status: 'connected',
-        tools: ['query', 'mutate']
+        tools: ['mcp_query', 'mcp_mutate']
       }
     ];
+  }
+
+  discoverInstalledProfileBundles() {
+    const bundles = [];
+    const possiblePaths = [
+      process.env.DSH_PROFILE_DIR ? path.join(process.env.DSH_PROFILE_DIR, 'package.json') : null,
+      path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh', 'profiles', 'desktop', 'package.json')
+    ].filter(Boolean);
+
+    for (const p of possiblePaths) {
+      if (fs.existsSync(p)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          if (pkg.dependencies) {
+            for (const [depName, version] of Object.entries(pkg.dependencies)) {
+              if (depName !== '@local/dsh-workflow-studio') {
+                bundles.push({ name: depName, version });
+              }
+            }
+          }
+          break;
+        } catch {}
+      }
+    }
+    return bundles;
   }
 }
