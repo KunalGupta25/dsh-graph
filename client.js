@@ -24,8 +24,8 @@ window.__ModuleLoader__.load({
     /**
      * Workflow Studio Modal & Canvas Component
      */
-    function WorkflowStudioApp({ isOpen, onClose }) {
-      if (!isOpen) return null;
+    function WorkflowStudioApp({ isOpen = true, onClose, embedded = false }) {
+      if (!isOpen && !embedded) return null;
 
       const [activeTab, setActiveTab] = useState('canvas'); // 'canvas' | 'marketplace'
       const [copilotOpen, setCopilotOpen] = useState(true);
@@ -165,11 +165,13 @@ window.__ModuleLoader__.load({
 
       return h('div', {
         style: {
-          position: 'fixed',
+          position: embedded ? 'relative' : 'fixed',
           top: 0, left: 0, right: 0, bottom: 0,
+          width: '100%',
+          height: '100%',
           backgroundColor: THEME.bg,
           color: THEME.textPrimary,
-          zIndex: 9999,
+          zIndex: embedded ? 1 : 9999,
           display: 'flex',
           flexDirection: 'column',
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
@@ -237,7 +239,7 @@ window.__ModuleLoader__.load({
                 cursor: 'pointer'
               }
             }, copilotOpen ? 'Hide Copilot' : 'Open Copilot'),
-            h('button', {
+            !embedded && onClose && h('button', {
               onClick: onClose,
               style: {
                 backgroundColor: 'transparent',
@@ -751,31 +753,75 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Icon Component for the Left Sidebar Panel Row (sidebar.panellist)
+     * Matches the size requested by the DSH shell.
+     */
+    function WorkflowStudioPanelIcon({ size = 18 }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round'
+      },
+        h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1.5 }),
+        h('rect', { x: 15, y: 3, width: 6, height: 6, rx: 1.5 }),
+        h('rect', { x: 9, y: 15, width: 6, height: 6, rx: 1.5 }),
+        h('path', { d: 'M6 9v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9' }),
+        h('path', { d: 'M12 13v2' })
+      );
+    }
+
+    /**
+     * Main Page View for Workflow Studio (rendered when selected in the sidebar)
+     */
+    function WorkflowStudioMainPage() {
+      return h(WorkflowStudioApp, { embedded: true });
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
-        // 1. Primary Left Sidebar Navigation
+        // 1. Primary Left Sidebar Panel Entry (sidebar.panellist)
+        // Order 20 places it directly below Automation tasks (order 10) and Plugins (order 0)
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: 'workflow-studio',
+          order: 20,
+          label: () => 'Workflow Studio'
+        }, WorkflowStudioPanelIcon));
+
+        // 2. Main Viewport Panel for Workflow Studio
+        ctx.slots.inject('main', () => ctx.slots.register({
+          name: 'main',
+          key: 'workflow-studio'
+        }, WorkflowStudioMainPage));
+
+        // 3. Fallback sidebar navigation slots
         ctx.slots.inject('sidebar.entry', () => ctx.slots.register({
           name: 'sidebar.entry',
           id: 'workflow-studio-sidebar',
-          order: 12
+          order: 20
         }, WorkflowStudioSidebarItem));
 
-        // 2. Sidebar action list fallback
         ctx.slots.inject('sidebar.panellist.actions', () => ctx.slots.register({
           name: 'sidebar.panellist.actions',
           id: 'workflow-studio-sidebar-action',
-          order: 12
+          order: 20
         }, WorkflowStudioSidebarItem));
 
-        // 3. Floating Overlay launcher (visible across any page)
+        // 4. Floating Overlay launcher (visible across any page)
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({
           name: 'shell.overlay',
           id: 'workflow-studio-pill',
           order: 100
         }, WorkflowStudioFloatingPill));
 
-        // 4. Conversation Composer Dock (visible inside active chat sessions)
+        // 5. Conversation Composer Dock (visible inside active chat sessions)
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock',
           id: 'workflow-studio-launcher',
