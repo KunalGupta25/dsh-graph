@@ -14,8 +14,8 @@ export function apply(ctx, config) {
   const market = new MarketplaceBridge(ctx);
   const creator = new CreatorEngine();
 
-  // Expose WorkflowStudio Host Service
-  ctx.workflowStudio = {
+  // Host Studio operations service
+  const studio = {
     async getGraph() {
       return await scanner.scan();
     },
@@ -51,6 +51,11 @@ export function apply(ctx, config) {
     }
   };
 
+  // Provide service safely in Cordis without triggering "cannot set property without provide"
+  if (typeof ctx.provide === 'function') {
+    ctx.provide('workflowStudio', studio);
+  }
+
   // Register Agent Tools for Creator Mode & Copilot integration
   if (ctx.tools?.register) {
     ctx.tools.register({
@@ -58,7 +63,7 @@ export function apply(ctx, config) {
       description: 'Inspects all active plugins, core services, agent presets, skills, and MCP clients in DeepSeek Harness as a node graph.',
       parameters: { type: 'object', properties: {} },
       async execute() {
-        const graph = await ctx.workflowStudio.getGraph();
+        const graph = await studio.getGraph();
         return {
           nodesCount: graph.nodes.length,
           edgesCount: graph.edges.length,
@@ -79,7 +84,7 @@ export function apply(ctx, config) {
         }
       },
       async execute(args) {
-        return await ctx.workflowStudio.searchMarketplace(args.query || '', args.category || 'all');
+        return await studio.searchMarketplace(args.query || '', args.category || 'all');
       }
     });
 
@@ -97,13 +102,13 @@ export function apply(ctx, config) {
         required: ['name', 'type', 'title']
       },
       async execute(args) {
-        return ctx.workflowStudio.scaffoldPlugin(args);
+        return studio.scaffoldPlugin(args);
       }
     });
   }
 
   // Cleanup effect
   return () => {
-    delete ctx.workflowStudio;
+    // Cordis automatically disposes services provided via ctx.provide
   };
 }
