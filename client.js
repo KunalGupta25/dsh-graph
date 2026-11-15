@@ -2,7 +2,7 @@ window.__ModuleLoader__.load({
   id: '@local/dsh-workflow-studio',
   factory(require) {
     const React = require('react');
-    const { useState, useEffect, createElement: h } = React;
+    const { useState, useEffect, useRef, createElement: h } = React;
 
     // --- DeepSeek Harness Native Theme Tokens ---
     const THEME = {
@@ -30,12 +30,13 @@ window.__ModuleLoader__.load({
      * Initial baseline topological DAG layout (collision-free 4-tier arrangement)
      */
     function computeTopologicalLayout(rawNodes) {
+      const copy = rawNodes.map(n => ({ ...n }));
       const tier0 = []; // Core
       const tier1 = []; // Presets
       const tier2 = []; // Skills & MCPs
       const tier3 = []; // Tools & Plugins
 
-      for (const n of rawNodes) {
+      for (const n of copy) {
         if (n.type === 'core') tier0.push(n);
         else if (n.type === 'preset') tier1.push(n);
         else if (n.type === 'skill' || n.type === 'mcp') tier2.push(n);
@@ -43,12 +44,10 @@ window.__ModuleLoader__.load({
       }
 
       const Y_PITCH = 115;
-      const copy = rawNodes.map(n => ({ ...n }));
-
       tier0.forEach((n, i) => { n.x = 80; n.y = 80 + i * Y_PITCH; });
-      tier1.forEach((n, i) => { n.x = 380; n.y = 80 + i * (Y_PITCH + 10); });
+      tier1.forEach((n, i) => { n.x = 380; n.y = 120 + i * (Y_PITCH + 25); });
       tier2.forEach((n, i) => { n.x = 680; n.y = 80 + i * Y_PITCH; });
-      tier3.forEach((n, i) => { n.x = 980; n.y = 80 + i * Y_PITCH; });
+      tier3.forEach((n, i) => { n.x = 980; n.y = 120 + i * Y_PITCH; });
 
       return copy;
     }
@@ -81,7 +80,7 @@ window.__ModuleLoader__.load({
       const [wiringMouse, setWiringMouse] = useState({ x: 0, y: 0 });
       const [selectedEdgeId, setSelectedEdgeId] = useState(null);
 
-      // Graph Nodes & Edges State
+      // Graph Nodes & Edges State (All initialized with explicit collision-free coordinates)
       const [nodes, setNodes] = useState(() => computeTopologicalLayout([
         { id: 'core:tools', label: 'Tools Engine', fullPackage: '@deepseek-ai/dsh-tools', type: 'core', readOnly: true, desc: 'Central tool registry and execution pipeline' },
         { id: 'core:sessions', label: 'Session Store', fullPackage: '@deepseek-ai/dsh-session', type: 'core', readOnly: true, desc: 'Event-sourced conversation storage' },
@@ -117,11 +116,15 @@ window.__ModuleLoader__.load({
         description: 'Custom capability generated in Creator Mode'
       });
 
-      // Copilot Chat
+      // Copilot Chat Messages
       const [chatMessages, setChatMessages] = useState([
-        { role: 'assistant', text: 'Welcome to Workflow Studio. You can drag any node, connect cables from output to input ports, click cables to disconnect, or use Creator Mode to scaffold plugins.' }
+        {
+          role: 'assistant',
+          text: '👋 Welcome to Workflow Studio! You can drag any node, connect cables from output to input ports, or ask me questions about your Cordis plugins.'
+        }
       ]);
       const [chatInput, setChatInput] = useState('');
+      const chatMessagesEndRef = useRef(null);
 
       // Auto-select first node on mount
       useEffect(() => {
@@ -129,6 +132,13 @@ window.__ModuleLoader__.load({
           setSelectedNode(nodes.find(n => n.id === 'preset:standard') || nodes[0]);
         }
       }, []);
+
+      // Auto-scroll chat to bottom
+      useEffect(() => {
+        if (activeDrawer === 'copilot' && copilotTab === 'chat' && chatMessagesEndRef.current) {
+          chatMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+      }, [chatMessages, activeDrawer, copilotTab]);
 
       // --- Pointer / Drag / Wiring Handlers ---
       const handleCanvasMouseDown = (e) => {
@@ -281,28 +291,47 @@ window.__ModuleLoader__.load({
         setActiveDrawer('inspector');
       };
 
-      // Copilot Chat
-      const handleChatSubmit = (e) => {
-        e.preventDefault();
-        if (!chatInput.trim()) return;
-        const q = chatInput;
+      // Copilot Chat Action Execution
+      const sendChatMessage = (text) => {
+        const query = (text || '').trim();
+        if (!query) return;
+
         setChatInput('');
-        setChatMessages(prev => [...prev, { role: 'user', text: q }]);
+        setChatMessages(prev => [...prev, { role: 'user', text: query }]);
 
         setTimeout(() => {
-          let reply = 'I analyzed your workflow. Standard Agent is currently connected to ' + edges.filter(ed => ed.from === 'preset:standard').length + ' components.';
-          if (q.toLowerCase().includes('arrange') || q.toLowerCase().includes('clean') || q.toLowerCase().includes('overlap')) {
+          const lower = query.toLowerCase();
+          let reply = 'I analyzed your workflow. The canvas has ' + nodes.length + ' nodes organized in 4 topological tiers.';
+          let actionBtn = null;
+
+          if (lower.includes('arrange') || lower.includes('clean') || lower.includes('overlap') || lower.includes('stack')) {
             handleAutoArrange();
-            reply = 'I ran the topological auto-arrange engine! Nodes are now cleanly aligned with zero overlaps.';
-          } else if (q.toLowerCase().includes('postgres') || q.toLowerCase().includes('database') || q.toLowerCase().includes('sql')) {
-            reply = 'For databases, I recommend @community/dsh-plugin-postgres. Click Marketplace to add it to your canvas.';
-          } else if (q.toLowerCase().includes('focus') || q.toLowerCase().includes('preset')) {
+            reply = '⚡ Topological auto-arrange executed! All nodes are now arranged in 4 collision-free columns (Core, Presets, Skills/MCPs, Tools).';
+          } else if (lower.includes('postgres') || lower.includes('database') || lower.includes('sql')) {
+            reply = 'For databases, I recommend @modelcontextprotocol/server-postgres. You can add it directly to your graph.';
+            actionBtn = {
+              label: '+ Add PostgreSQL MCP',
+              onClick: () => handleAddMarketplaceItem(MARKETPLACE_CATALOG[0])
+            };
+          } else if (lower.includes('github') || lower.includes('git')) {
+            reply = 'For GitHub repository automation, I recommend @modelcontextprotocol/server-github.';
+            actionBtn = {
+              label: '+ Add GitHub MCP',
+              onClick: () => handleAddMarketplaceItem(MARKETPLACE_CATALOG[1])
+            };
+          } else if (lower.includes('scaffold') || lower.includes('create') || lower.includes('new plugin')) {
+            setCopilotTab('creator');
+            reply = 'Switched to Creator Scaffolder. Fill in your plugin details and click Scaffold.';
+          } else if (lower.includes('standard') || lower.includes('agent')) {
             const presetNode = nodes.find(n => n.id === 'preset:standard');
             if (presetNode) setSelectedNode(presetNode);
-            reply = 'Focused on Standard Agent Preset in the inspector.';
+            reply = 'Selected Standard Agent. It connects core dispatch to tools and skills.';
+          } else {
+            reply = 'You can ask me to "auto-arrange nodes", "add postgres", "scaffold new plugin", or drag cables between handles on the canvas.';
           }
-          setChatMessages(prev => [...prev, { role: 'assistant', text: reply }]);
-        }, 300);
+
+          setChatMessages(prev => [...prev, { role: 'assistant', text: reply, actionBtn }]);
+        }, 200);
       };
 
       return h('div', {
@@ -662,13 +691,15 @@ window.__ModuleLoader__.load({
 
           // --- Right Slide-Over Inspector / Copilot / Marketplace Drawer ---
           activeDrawer && h('div', {
+            onMouseDown: e => e.stopPropagation(),
             style: {
               width: 360,
               backgroundColor: THEME.surface,
               borderLeft: '1px solid ' + THEME.border,
               display: 'flex',
               flexDirection: 'column',
-              zIndex: 100
+              zIndex: 100,
+              userSelect: 'text'
             }
           },
             // Drawer Tabs Header
@@ -731,7 +762,7 @@ window.__ModuleLoader__.load({
                 h('div', null,
                   h('div', { style: fieldLabelStyle }, 'Canvas Position'),
                   h('div', { style: { fontSize: 12, color: THEME.textMuted, marginTop: 4 } },
-                    'X: ' + (selectedNode.x || 0) + 'px  •  Y: ' + (selectedNode.y || 0) + 'px (Drag node to move)'
+                    'X: ' + (selectedNode.x || 0) + 'px  •  Y: ' + (selectedNode.y || 0) + 'px (Drag node on canvas to move)'
                   )
                 ),
 
@@ -799,15 +830,8 @@ window.__ModuleLoader__.load({
                   placeholder: 'Search marketplace & skills...',
                   value: marketSearch,
                   onChange: e => setMarketSearch(e.target.value),
-                  style: {
-                    padding: '8px 12px',
-                    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-                    border: '1px solid ' + THEME.border,
-                    borderRadius: 6,
-                    color: THEME.textPrimary,
-                    fontSize: 12,
-                    outline: 'none'
-                  }
+                  onKeyDown: e => e.stopPropagation(),
+                  style: inputStyle
                 }),
 
                 // Category Filter Pills
@@ -897,54 +921,112 @@ window.__ModuleLoader__.load({
               ),
 
               copilotTab === 'chat' ? h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } },
+                // Quick Action Suggestion Chips
+                h('div', {
+                  style: {
+                    padding: '8px 12px',
+                    borderBottom: '1px solid ' + THEME.border,
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6
+                  }
+                },
+                  h('button', {
+                    onClick: () => sendChatMessage('auto-arrange graph'),
+                    style: chipBtnStyle
+                  }, '⚡ Auto-Arrange'),
+                  h('button', {
+                    onClick: () => sendChatMessage('suggest database mcps'),
+                    style: chipBtnStyle
+                  }, '🔌 Database MCPs'),
+                  h('button', {
+                    onClick: () => sendChatMessage('explain standard agent'),
+                    style: chipBtnStyle
+                  }, '🔍 Standard Agent')
+                ),
+
                 // Chat Message Stream
                 h('div', { style: { flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 } },
                   chatMessages.map((m, idx) => h('div', {
                     key: idx,
                     style: {
                       alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: '85%',
+                      maxWidth: '88%',
                       backgroundColor: m.role === 'user' ? THEME.accent : 'rgba(255, 255, 255, 0.05)',
                       color: THEME.textPrimary,
                       padding: '8px 12px',
                       borderRadius: 8,
                       fontSize: 12,
-                      lineHeight: 1.4
+                      lineHeight: 1.45,
+                      userSelect: 'text'
                     }
-                  }, m.text))
+                  },
+                    h('div', null, m.text),
+                    m.actionBtn && h('button', {
+                      onClick: m.actionBtn.onClick,
+                      style: {
+                        marginTop: 6,
+                        padding: '4px 10px',
+                        backgroundColor: THEME.accent,
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        cursor: 'pointer'
+                      }
+                    }, m.actionBtn.label)
+                  )),
+                  h('div', { ref: chatMessagesEndRef })
                 ),
-                // Input bar
-                h('form', {
-                  onSubmit: handleChatSubmit,
-                  style: { padding: 8, borderTop: '1px solid ' + THEME.border, display: 'flex', gap: 6 }
+
+                // Input bar (explicit non-blocking handlers)
+                h('div', {
+                  style: {
+                    padding: 8,
+                    borderTop: '1px solid ' + THEME.border,
+                    display: 'flex',
+                    gap: 6,
+                    backgroundColor: THEME.surface
+                  }
                 },
                   h('input', {
                     type: 'text',
                     value: chatInput,
                     onChange: e => setChatInput(e.target.value),
-                    placeholder: 'Ask about plugins, auto-arranging...',
+                    onKeyDown: e => {
+                      e.stopPropagation();
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        sendChatMessage(chatInput);
+                      }
+                    },
+                    placeholder: 'Ask about plugins, auto-arrange, MCPs...',
                     style: {
                       flex: 1,
-                      padding: '6px 10px',
+                      padding: '7px 12px',
                       backgroundColor: 'rgba(255, 255, 255, 0.04)',
                       border: '1px solid ' + THEME.border,
                       borderRadius: 6,
                       color: THEME.textPrimary,
                       fontSize: 12,
-                      outline: 'none'
+                      outline: 'none',
+                      userSelect: 'text'
                     }
                   }),
                   h('button', {
-                    type: 'submit',
+                    type: 'button',
+                    onClick: () => sendChatMessage(chatInput),
                     style: {
-                      padding: '6px 12px',
+                      padding: '7px 14px',
                       backgroundColor: THEME.accent,
                       border: 'none',
                       borderRadius: 6,
                       color: '#fff',
                       fontSize: 12,
                       fontWeight: 600,
-                      cursor: 'pointer'
+                      cursor: 'pointer',
+                      flex: 'none'
                     }
                   }, 'Send')
                 )
@@ -959,6 +1041,7 @@ window.__ModuleLoader__.load({
                     type: 'text',
                     value: creatorForm.name,
                     onChange: e => setCreatorForm({ ...creatorForm, name: e.target.value }),
+                    onKeyDown: e => e.stopPropagation(),
                     style: inputStyle
                   }),
 
@@ -967,6 +1050,7 @@ window.__ModuleLoader__.load({
                     type: 'text',
                     value: creatorForm.title,
                     onChange: e => setCreatorForm({ ...creatorForm, title: e.target.value }),
+                    onKeyDown: e => e.stopPropagation(),
                     style: inputStyle
                   }),
 
@@ -985,6 +1069,7 @@ window.__ModuleLoader__.load({
                   h('textarea', {
                     value: creatorForm.description,
                     onChange: e => setCreatorForm({ ...creatorForm, description: e.target.value }),
+                    onKeyDown: e => e.stopPropagation(),
                     rows: 3,
                     style: { ...inputStyle, resize: 'none' }
                   }),
@@ -1024,7 +1109,8 @@ window.__ModuleLoader__.load({
                       border: '1px solid ' + THEME.border,
                       borderRadius: 6,
                       fontSize: 12,
-                      fontFamily: 'monospace'
+                      fontFamily: 'monospace',
+                      userSelect: 'text'
                     }
                   },
                     ch.action === 'insert' && h('span', { style: { color: THEME.tool } }, '+ add plugin: ' + ch.package),
@@ -1116,6 +1202,16 @@ window.__ModuleLoader__.load({
       border: '1px solid ' + THEME.border
     };
 
+    const chipBtnStyle = {
+      padding: '3px 8px',
+      backgroundColor: 'rgba(255, 255, 255, 0.05)',
+      border: '1px solid ' + THEME.border,
+      borderRadius: 12,
+      color: THEME.textSecondary,
+      fontSize: 11,
+      cursor: 'pointer'
+    };
+
     const inputStyle = {
       width: '100%',
       padding: '6px 10px',
@@ -1125,7 +1221,8 @@ window.__ModuleLoader__.load({
       color: THEME.textPrimary,
       fontSize: 12,
       outline: 'none',
-      boxSizing: 'border-box'
+      boxSizing: 'border-box',
+      userSelect: 'text'
     };
 
     // Curated Marketplace Registry
