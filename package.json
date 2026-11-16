@@ -27,8 +27,7 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "slots"
+        "@deepseek-ai/dsh-client-ui-sidebar"
       ]
     }
   }

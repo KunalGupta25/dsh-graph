@@ -25,3 +25,9 @@ Thumbs.db
 .env
 .env.local
 *.local
+
+# Antigravity & Agent workspace artifacts
+.agents/
+skills-lock.json
+scratch/
+*.scratch.*

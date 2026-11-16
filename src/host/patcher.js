@@ -1,126 +1,72 @@
+import { toYaml } from './util.js';
+
 /**
- * Handles Cordis patch generation, diff calculation, and validation for staging.
+ * Builds cordis.patch.yml text from staged changes and renders a real line diff.
+ * Row shapes follow the dsh-doc bundle rules: `- insert:` adds rows; a row restating an existing
+ * Loader row id overrides it (used for preset `plugins` lists).
  */
 export class CordisPatcher {
   /**
-   * Generates a unified cordis.patch.yml from staged node mutations.
-   * @param {Object} staging 
-   * @param {Array} staging.addedPlugins
-   * @param {Array} staging.removedPlugins
-   * @param {Array} staging.overriddenPresets
+   * @param {{addedPlugins?: Array, overriddenPresets?: Array, removedPlugins?: string[]}} staging
    */
   generatePatch(staging = {}) {
-    const patchRows = [];
-
-    // 1. New insertions
-    if (Array.isArray(staging.addedPlugins) && staging.addedPlugins.length > 0) {
-      const inserts = staging.addedPlugins.map(p => ({
-        id: p.id || p.name.replace(/^@.*\//, ''),
-        name: p.name,
-        config: p.config || {}
-      }));
-      patchRows.push({ insert: inserts });
+    const rows = [];
+    const added = (staging.addedPlugins || []).filter((p) => p && p.name);
+    if (added.length) {
+      rows.push({
+        insert: added.map((p) => {
+          const row = { id: p.id || String(p.name).replace(/^@[^/]+\//, ''), name: p.name };
+          if (p.config && Object.keys(p.config).length) row.config = p.config;
+          return row;
+        }),
+      });
     }
-
-    // 2. Preset overrides / modifications
-    if (Array.isArray(staging.overriddenPresets)) {
-      for (const preset of staging.overriddenPresets) {
-        patchRows.push({
-          id: `preset-${preset.id}`,
-          name: '@deepseek-ai/dsh-agent-preset',
-          config: {
-            id: preset.id,
-            name: preset.name,
-            description: preset.description,
-            order: preset.order || 10,
-            plugins: preset.plugins || []
-          }
-        });
-      }
+    for (const preset of staging.overriddenPresets || []) {
+      rows.push({
+        id: preset.rowId || `preset-${preset.id}`,
+        name: '@deepseek-ai/dsh-agent-preset',
+        config: {
+          id: preset.id,
+          name: preset.name,
+          description: preset.description,
+          order: preset.order ?? 10,
+          plugins: preset.plugins || [],
+        },
+      });
     }
-
-    // 3. Removed / disabled rows
-    if (Array.isArray(staging.removedPlugins)) {
-      for (const rowId of staging.removedPlugins) {
-        patchRows.push({
-          id: rowId,
-          disabled: true
-        });
-      }
-    }
-
-    return this.serializeYaml(patchRows);
+    for (const rowId of staging.removedPlugins || []) rows.push({ id: rowId, disabled: true });
+    return toYaml(rows);
   }
 
-  /**
-   * Generates a readable unified diff format for user preview.
-   */
-  computeDiff(baselineYaml, stagedYaml) {
-    const baseLines = baselineYaml.split('\n');
-    const stagedLines = stagedYaml.split('\n');
-
-    const diff = [];
-    diff.push('--- baseline/cordis.patch.yml');
-    diff.push('+++ staged/cordis.patch.yml');
-    diff.push('@@ -1,' + baseLines.length + ' +1,' + stagedLines.length + ' @@');
-
-    for (const line of stagedLines) {
-      if (!baseLines.includes(line)) {
-        diff.push(`+ ${line}`);
-      } else {
-        diff.push(`  ${line}`);
+  /** Line diff using LCS. Returns a unified-style string plus structured hunks for the UI. */
+  computeDiff(before = '', after = '') {
+    const a = String(before).split('\n');
+    const b = String(after).split('\n');
+    const n = a.length, m = b.length;
+    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
       }
     }
-
-    return diff.join('\n');
+    const lines = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { lines.push({ t: ' ', s: a[i] }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { lines.push({ t: '-', s: a[i++] }); }
+      else { lines.push({ t: '+', s: b[j++] }); }
+    }
+    while (i < n) lines.push({ t: '-', s: a[i++] });
+    while (j < m) lines.push({ t: '+', s: b[j++] });
+    const changed = lines.filter((l) => l.t !== ' ').length;
+    return {
+      changed,
+      lines,
+      text: ['--- current', '+++ staged', ...lines.map((l) => `${l.t} ${l.s}`)].join('\n'),
+    };
   }
 
-  /**
-   * Minimal YAML serializer for Cordis patch arrays.
-   */
-  serializeYaml(data, indent = 0) {
-    const pad = '  '.repeat(indent);
-    let out = '';
-
-    if (Array.isArray(data)) {
-      for (const item of data) {
-        if (typeof item === 'object' && item !== null) {
-          const keys = Object.keys(item);
-          if (keys.length === 0) continue;
-          const firstKey = keys[0];
-          const firstVal = item[firstKey];
-
-          if (Array.isArray(firstVal)) {
-            out += `${pad}- ${firstKey}:\n${this.serializeYaml(firstVal, indent + 2)}`;
-          } else if (typeof firstVal === 'object' && firstVal !== null) {
-            out += `${pad}- ${firstKey}:\n${this.serializeYaml(firstVal, indent + 2)}`;
-          } else {
-            out += `${pad}- ${firstKey}: ${firstVal}\n`;
-          }
-
-          for (let i = 1; i < keys.length; i++) {
-            const k = keys[i];
-            const v = item[k];
-            if (typeof v === 'object' && v !== null) {
-              out += `${pad}  ${k}:\n${this.serializeYaml(v, indent + 2)}`;
-            } else {
-              out += `${pad}  ${k}: ${v}\n`;
-            }
-          }
-        }
-      }
-    } else if (typeof data === 'object' && data !== null) {
-      for (const [k, v] of Object.entries(data)) {
-        if (Array.isArray(v)) {
-          out += `${pad}${k}:\n${this.serializeYaml(v, indent + 1)}`;
-        } else if (typeof v === 'object' && v !== null) {
-          out += `${pad}${k}:\n${this.serializeYaml(v, indent + 1)}`;
-        } else {
-          out += `${pad}${k}: ${v}\n`;
-        }
-      }
-    }
-
-    return out;
+  serializeYaml(data) {
+    return toYaml(data);
   }
 }

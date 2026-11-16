@@ -2,1289 +2,565 @@ window.__ModuleLoader__.load({
   id: '@local/dsh-workflow-studio',
   factory(require) {
     const React = require('react');
-    const { useState, useEffect, useRef, createElement: h } = React;
+    const { useState, useEffect, useRef, useMemo, useCallback, createElement: h } = React;
 
-    // --- DeepSeek Harness Native Theme Tokens ---
-    const THEME = {
-      bg: '#14161a',              // DSH deep neutral-bluish canvas
-      gridDot: '#232731',         // n8n dot grid
-      surface: '#1d2129',          // node card surface
-      surfaceHover: '#252b36',    // hovered card surface
-      surfaceSelected: '#2a313d', // selected node highlight
-      border: 'rgba(255, 255, 255, 0.08)',
-      borderHover: 'rgba(255, 255, 255, 0.18)',
-      textPrimary: '#edf0f5',     // DSH off-white text
-      textSecondary: '#8c95a6',   // cool gray label text
-      textMuted: '#5d6575',
-      accent: '#4f78e8',          // DSH brand blue
-      accentGlow: 'rgba(79, 120, 232, 0.25)',
-      core: '#64748b',            // slate
-      preset: '#f59e0b',          // amber
-      tool: '#10b981',            // emerald
-      mcp: '#06b6d4',             // cyan
-      skill: '#a855f7',           // purple
-      draft: '#eab308'            // gold
+    const API = '/api/workflow-studio';
+    const MASK = '••••••••';
+
+    // ---- Theme: verified DSH tokens from @deepseek-ai/dsh-client-ui-theme ----
+    const tv = (name, fb) => `var(--dsw-alias-${name}, ${fb})`;
+    const C = {
+      bg: tv('bg-base', '#14161a'),
+      surface: tv('bg-l1', '#1d2129'),
+      surface2: tv('bg-l2', '#252b36'),
+      border: tv('border-l1', 'rgba(255,255,255,0.09)'),
+      text: tv('label-primary', '#edf0f5'),
+      text2: tv('label-secondary', '#8c95a6'),
+      muted: tv('label-tertiary', '#5d6575'),
+      accent: tv('brand-primary', '#4f78e8'),
+      danger: tv('state-error-primary', '#ef4444'),
+      ok: tv('state-success-primary', '#10b981'),
+      warn: tv('state-warn-primary', '#f59e0b'),
     };
+    const TYPE = {
+      core: { c: '#64748b', l: 'Core' }, plugin: { c: '#4f78e8', l: 'Plugin' }, tool: { c: '#10b981', l: 'Tool' },
+      mcp: { c: '#06b6d4', l: 'MCP' }, preset: { c: '#f59e0b', l: 'Preset' }, skill: { c: '#a855f7', l: 'Skill' },
+      bundle: { c: '#6366f1', l: 'Bundle' }, draft: { c: '#eab308', l: 'Draft' },
+    };
+    const NW = 240, NH = 72;
 
-    /**
-     * Initial baseline topological DAG layout (collision-free 4-tier arrangement)
-     */
-    function computeTopologicalLayout(rawNodes) {
-      const copy = rawNodes.map(n => ({ ...n }));
-      const tier0 = []; // Core
-      const tier1 = []; // Presets
-      const tier2 = []; // Skills & MCPs
-      const tier3 = []; // Tools & Plugins
+    // Resolve against the directory the host UI is served from, so a reverse-proxy path prefix works
+    // (same approach as dsh-market's api()).
+    function apiUrl(path) {
+      const rel = (API + path).replace(/^\/+/, '');
+      if (typeof document === 'undefined') return `/${rel}`;
+      try { return new URL(rel, document.baseURI).pathname; } catch { return `/${rel}`; }
+    }
+    // Capability disclosure labels from the catalog's static scan; risky ones are highlighted.
+    const RISKY_CAPS = /shell|exec|credential|dynamic|eval|network|env/i;
+    const CapBadges = (item) => (item.capabilities === undefined
+      ? Badge('not scanned', C.muted)
+      : item.capabilities.length === 0 ? Badge('scan: nothing detected', C.ok)
+        : item.capabilities.slice(0, 8).map((c) => h('span', { key: c }, Badge(c, RISKY_CAPS.test(c) ? C.warn : C.text2), ' ')));
 
-      for (const n of copy) {
-        if (n.type === 'core') tier0.push(n);
-        else if (n.type === 'preset') tier1.push(n);
-        else if (n.type === 'skill' || n.type === 'mcp') tier2.push(n);
-        else tier3.push(n);
+    async function api(path, body) {
+      const init = body === undefined ? { credentials: 'same-origin' } : {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      };
+      const res = await fetch(apiUrl(path), init);
+      let j = {};
+      try { j = await res.json(); } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      return j;
+    }
+    const lsGet = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+    const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } };
+
+    // ---- Layout: n8n-style multi-tier columns with sub-column wrapping to prevent vertical spikes or stacking ----
+    const TIER = { core: 0, preset: 1, bundle: 1, plugin: 2, tool: 2, mcp: 3, skill: 4, draft: 4 };
+    function autoLayout(nodes) {
+      const cols = {};
+      for (const n of nodes) {
+        const tier = TIER[n.type] ?? 2;
+        (cols[tier] ||= []).push(n);
       }
-
-      const Y_PITCH = 115;
-      tier0.forEach((n, i) => { n.x = 80; n.y = 80 + i * Y_PITCH; });
-      tier1.forEach((n, i) => { n.x = 380; n.y = 120 + i * (Y_PITCH + 25); });
-      tier2.forEach((n, i) => { n.x = 680; n.y = 80 + i * Y_PITCH; });
-      tier3.forEach((n, i) => { n.x = 980; n.y = 120 + i * Y_PITCH; });
-
-      return copy;
-    }
-
-    /**
-     * Workflow Studio Full Page & Interactive Canvas
-     */
-    function WorkflowStudioApp({ isOpen = true, onClose, embedded = false }) {
-      if (!isOpen && !embedded) return null;
-
-      // Active Drawers: 'inspector' | 'copilot' | 'market' | 'diff' | null
-      const [activeDrawer, setActiveDrawer] = useState('inspector');
-      const [copilotTab, setCopilotTab] = useState('chat'); // 'chat' | 'creator'
-      const [marketCategory, setMarketCategory] = useState('all');
-      const [marketSearch, setMarketSearch] = useState('');
-
-      // Canvas Navigation State
-      const [scale, setScale] = useState(1);
-      const [pan, setPan] = useState({ x: 60, y: 40 });
-      const [isPanning, setIsPanning] = useState(false);
-      const [panStart, setPanStart] = useState({ x: 0, y: 0 });
-
-      // Node Dragging State (Every node is movable!)
-      const [draggedNodeId, setDraggedNodeId] = useState(null);
-      const [nodeDragOffset, setNodeDragOffset] = useState({ x: 0, y: 0 });
-      const [selectedNode, setSelectedNode] = useState(null);
-
-      // Interactive Cable Wiring State
-      const [wiringStart, setWiringStart] = useState(null); // { nodeId, x, y }
-      const [wiringMouse, setWiringMouse] = useState({ x: 0, y: 0 });
-      const [selectedEdgeId, setSelectedEdgeId] = useState(null);
-
-      // Graph Nodes & Edges State (All initialized with explicit collision-free coordinates)
-      const [nodes, setNodes] = useState(() => computeTopologicalLayout([
-        { id: 'core:tools', label: 'Tools Engine', fullPackage: '@deepseek-ai/dsh-tools', type: 'core', readOnly: true, desc: 'Central tool registry and execution pipeline' },
-        { id: 'core:sessions', label: 'Session Store', fullPackage: '@deepseek-ai/dsh-session', type: 'core', readOnly: true, desc: 'Event-sourced conversation storage' },
-        { id: 'core:agents', label: 'Agent Runtime', fullPackage: '@deepseek-ai/dsh-agent', type: 'core', readOnly: true, desc: 'Agent loop and execution dispatch' },
-        { id: 'core:pluginManager', label: 'Plugin Manager', fullPackage: '@deepseek-ai/dsh-plugin-manager', type: 'core', readOnly: true, desc: 'Profile-wide bundle composer' },
-        { id: 'preset:standard', label: 'Standard Agent', fullPackage: '@deepseek-ai/dsh-agent-preset', type: 'preset', readOnly: true, desc: 'Default agent with bash and editing tools' },
-        { id: 'preset:ptc', label: 'PTC Agent', fullPackage: '@deepseek-ai/dsh-agent-preset', type: 'preset', readOnly: true, desc: 'Programmatic tool calling agent' },
-        { id: 'skill:gravitas', label: 'Skill: gravitas', fullPackage: 'skill://gravitas', type: 'skill', readOnly: false, desc: 'Engineering reliability runtime directives' },
-        { id: 'skill:rextend', label: 'Skill: rextend', fullPackage: 'skill://rextend', type: 'skill', readOnly: false, desc: 'Reverse engineering and knowledge preservation' },
-        { id: 'mcp:builtin', label: 'Local MCP Server', fullPackage: '@deepseek-ai/dsh-mcp-client', type: 'mcp', readOnly: false, desc: 'Model Context Protocol local bridge' },
-        { id: 'plugin:tool-bash', label: 'Bash Tool', fullPackage: '@deepseek-ai/dsh-tool-bash', type: 'tool', readOnly: true, desc: 'Model-facing terminal command tool' },
-        { id: 'plugin:tool-editor', label: 'Str Replace Editor', fullPackage: '@deepseek-ai/dsh-tool-str-replace-editor', type: 'tool', readOnly: true, desc: 'Precise text file replace editor' }
-      ]));
-
-      const [edges, setEdges] = useState([
-        { id: 'e1', from: 'core:agents', to: 'preset:standard' },
-        { id: 'e2', from: 'core:agents', to: 'preset:ptc' },
-        { id: 'e3', from: 'preset:standard', to: 'skill:gravitas' },
-        { id: 'e4', from: 'preset:standard', to: 'skill:rextend' },
-        { id: 'e5', from: 'preset:standard', to: 'mcp:builtin' },
-        { id: 'e6', from: 'preset:standard', to: 'plugin:tool-bash' },
-        { id: 'e7', from: 'preset:standard', to: 'plugin:tool-editor' }
-      ]);
-
-      // Staging Diff State
-      const [stagedChanges, setStagedChanges] = useState([]);
-
-      // Creator Mode Form
-      const [creatorForm, setCreatorForm] = useState({
-        name: 'custom-tool',
-        type: 'host-tool',
-        title: 'Custom Tool',
-        description: 'Custom capability generated in Creator Mode'
-      });
-
-      // Copilot Chat Messages
-      const [chatMessages, setChatMessages] = useState([
-        {
-          role: 'assistant',
-          text: '👋 Welcome to Workflow Studio! You can drag any node, connect cables from output to input ports, or ask me questions about your Cordis plugins.'
-        }
-      ]);
-      const [chatInput, setChatInput] = useState('');
-      const chatMessagesEndRef = useRef(null);
-
-      // Auto-select first node on mount
-      useEffect(() => {
-        if (!selectedNode && nodes.length > 0) {
-          setSelectedNode(nodes.find(n => n.id === 'preset:standard') || nodes[0]);
-        }
-      }, []);
-
-      // Auto-scroll chat to bottom
-      useEffect(() => {
-        if (activeDrawer === 'copilot' && copilotTab === 'chat' && chatMessagesEndRef.current) {
-          chatMessagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-        }
-      }, [chatMessages, activeDrawer, copilotTab]);
-
-      // --- Pointer / Drag / Wiring Handlers ---
-      const handleCanvasMouseDown = (e) => {
-        if (e.target.id === 'canvas-bg' || e.target.tagName === 'svg') {
-          setIsPanning(true);
-          setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
-          setSelectedEdgeId(null);
-        }
-      };
-
-      const handleNodeMouseDown = (e, node) => {
-        e.stopPropagation();
-        setSelectedNode(node);
-        setSelectedEdgeId(null);
-        setActiveDrawer('inspector');
-        setDraggedNodeId(node.id);
-        const nodeX = node.x || 0;
-        const nodeY = node.y || 0;
-        setNodeDragOffset({
-          x: (e.clientX - pan.x) / scale - nodeX,
-          y: (e.clientY - pan.y) / scale - nodeY
+      const pos = {};
+      let colOffset = 0;
+      for (let t = 0; t <= 4; t++) {
+        const list = cols[t] || [];
+        if (!list.length) continue;
+        const maxPerCol = 6;
+        list.forEach((n, i) => {
+          const subCol = Math.floor(i / maxPerCol);
+          const row = i % maxPerCol;
+          pos[n.id] = {
+            x: 50 + (colOffset + subCol) * (NW + 70),
+            y: 50 + row * (NH + 32),
+          };
         });
-      };
+        colOffset += Math.ceil(list.length / maxPerCol);
+      }
+      return pos;
+    }
 
-      const handlePortMouseDown = (e, node, type) => {
-        e.stopPropagation();
-        if (type === 'output') {
-          const startX = (node.x || 0) + 210;
-          const startY = (node.y || 0) + 41;
-          setWiringStart({ nodeId: node.id, x: startX, y: startY });
-          setWiringMouse({ x: startX, y: startY });
-        }
-      };
-
-      const handlePortMouseUp = (e, targetNode, type) => {
-        e.stopPropagation();
-        if (wiringStart && wiringStart.nodeId !== targetNode.id && type === 'input') {
-          const exists = edges.some(edge => edge.from === wiringStart.nodeId && edge.to === targetNode.id);
-          if (!exists) {
-            const newEdgeId = 'e_' + Date.now();
-            const newEdge = { id: newEdgeId, from: wiringStart.nodeId, to: targetNode.id, type: 'user' };
-            setEdges(prev => [...prev, newEdge]);
-            const sourceNode = nodes.find(n => n.id === wiringStart.nodeId);
-            setStagedChanges(prev => [
-              { action: 'connect', from: wiringStart.nodeId, to: targetNode.id, label: (sourceNode ? sourceNode.label : wiringStart.nodeId) + ' ➔ ' + targetNode.label },
-              ...prev
-            ]);
+    // Discard any corrupt stored positions where nodes share the exact same coordinates (unstack)
+    function sanitizePositions(stored, nodes) {
+      if (!stored || typeof stored !== 'object') return {};
+      const result = {};
+      const seen = new Set();
+      for (const n of nodes) {
+        const p = stored[n.id];
+        if (p && typeof p.x === 'number' && typeof p.y === 'number' && !isNaN(p.x) && !isNaN(p.y)) {
+          const key = `${Math.round(p.x)},${Math.round(p.y)}`;
+          if (!seen.has(key) && !(p.x === 0 && p.y === 0)) {
+            seen.add(key);
+            result[n.id] = p;
           }
         }
-        setWiringStart(null);
-      };
+      }
+      return result;
+    }
 
-      const handleMouseMove = (e) => {
-        if (wiringStart) {
-          const currentX = (e.clientX - pan.x) / scale;
-          const currentY = (e.clientY - pan.y) / scale;
-          setWiringMouse({ x: currentX, y: currentY });
-        } else if (draggedNodeId) {
-          const currentX = (e.clientX - pan.x) / scale - nodeDragOffset.x;
-          const currentY = (e.clientY - pan.y) / scale - nodeDragOffset.y;
-          setNodes(prev => prev.map(n => n.id === draggedNodeId ? { ...n, x: Math.round(currentX), y: Math.round(currentY) } : n));
-        } else if (isPanning) {
-          setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
-        }
-      };
+    const btn = (extra) => ({
+      background: C.surface2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: '5px 10px',
+      fontSize: 12, cursor: 'pointer', ...extra,
+    });
+    const primary = (extra) => btn({ background: C.accent, border: `1px solid ${C.accent}`, color: '#fff', ...extra });
+    const input = (extra) => ({
+      background: C.bg, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6, padding: '5px 8px',
+      fontSize: 12, width: '100%', boxSizing: 'border-box', outline: 'none', ...extra,
+    });
+    const Badge = (text, color) => h('span', {
+      style: { fontSize: 10, padding: '1px 6px', borderRadius: 8, background: `${color}22`, color, border: `1px solid ${color}55`, whiteSpace: 'nowrap' },
+    }, text);
 
-      const handleMouseUp = () => {
-        setDraggedNodeId(null);
-        setIsPanning(false);
-        setWiringStart(null);
-      };
-
-      // Disconnect specific edge
-      const handleDeleteEdge = (edgeId) => {
-        setEdges(prev => prev.filter(e => e.id !== edgeId));
-        if (selectedEdgeId === edgeId) setSelectedEdgeId(null);
-        setStagedChanges(prev => [{ action: 'disconnect', edgeId }, ...prev]);
-      };
-
-      // Disconnect all edges for selected node
-      const handleDisconnectAllNodeEdges = (nodeId) => {
-        const removed = edges.filter(e => e.from === nodeId || e.to === nodeId);
-        setEdges(prev => prev.filter(e => e.from !== nodeId && e.to !== nodeId));
-        setStagedChanges(prev => [{ action: 'disconnect-all', nodeId, count: removed.length }, ...prev]);
-      };
-
-      // Auto-arrange Toolbar Action
-      const handleAutoArrange = () => {
-        setNodes(prev => computeTopologicalLayout(prev));
-      };
-
-      // Add Marketplace Item to Graph
-      const handleAddMarketplaceItem = (item) => {
-        const nodeId = 'market:' + item.id;
-        if (nodes.some(n => n.id === nodeId)) return;
-
-        // Position on Tier 3 with safe Y offset
-        const tier3Count = nodes.filter(n => n.x >= 900).length;
-        const newNode = {
-          id: nodeId,
-          label: item.title,
-          fullPackage: item.name,
-          type: item.type === 'mcp' ? 'mcp' : item.type === 'skill' ? 'skill' : 'tool',
-          readOnly: false,
-          status: 'ready',
-          description: item.description,
-          x: 980,
-          y: 80 + tier3Count * 115,
-          isDraft: true
-        };
-
-        setNodes(prev => [...prev, newNode]);
-        setEdges(prev => [...prev, { id: 'edge:preset:standard->' + nodeId, from: 'preset:standard', to: nodeId }]);
-        setStagedChanges(prev => [...prev, { action: 'insert', package: item.name, id: item.id }]);
-        setSelectedNode(newNode);
-        setActiveDrawer('inspector');
-      };
-
-      // Delete Node Action
-      const handleDeleteNode = (nodeId) => {
-        setNodes(prev => prev.filter(n => n.id !== nodeId));
-        setEdges(prev => prev.filter(e => e.from !== nodeId && e.to !== nodeId));
-        setStagedChanges(prev => [...prev, { action: 'remove', id: nodeId }]);
-        setSelectedNode(null);
-      };
-
-      // Scaffold in Creator Mode
-      const handleScaffoldSubmit = () => {
-        const cleanName = creatorForm.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-        const nodeId = 'draft:' + cleanName;
-        const tier3Count = nodes.filter(n => n.x >= 900).length;
-
-        const newNode = {
-          id: nodeId,
-          label: creatorForm.title,
-          fullPackage: '@local/' + cleanName,
-          type: 'draft',
-          readOnly: false,
-          status: 'draft',
-          description: creatorForm.description,
-          x: 980,
-          y: 80 + tier3Count * 115,
-          isDraft: true
-        };
-
-        setNodes(prev => [...prev, newNode]);
-        setEdges(prev => [...prev, { id: 'edge:preset:standard->' + nodeId, from: 'preset:standard', to: nodeId }]);
-        setStagedChanges(prev => [...prev, { action: 'scaffold', package: '@local/' + cleanName, type: creatorForm.type }]);
-        setSelectedNode(newNode);
-        setActiveDrawer('inspector');
-      };
-
-      // Copilot Chat Action Execution
-      const sendChatMessage = (text) => {
-        const query = (text || '').trim();
-        if (!query) return;
-
-        setChatInput('');
-        setChatMessages(prev => [...prev, { role: 'user', text: query }]);
-
-        setTimeout(() => {
-          const lower = query.toLowerCase();
-          let reply = 'I analyzed your workflow. The canvas has ' + nodes.length + ' nodes organized in 4 topological tiers.';
-          let actionBtn = null;
-
-          if (lower.includes('arrange') || lower.includes('clean') || lower.includes('overlap') || lower.includes('stack')) {
-            handleAutoArrange();
-            reply = '⚡ Topological auto-arrange executed! All nodes are now arranged in 4 collision-free columns (Core, Presets, Skills/MCPs, Tools).';
-          } else if (lower.includes('postgres') || lower.includes('database') || lower.includes('sql')) {
-            reply = 'For databases, I recommend @modelcontextprotocol/server-postgres. You can add it directly to your graph.';
-            actionBtn = {
-              label: '+ Add PostgreSQL MCP',
-              onClick: () => handleAddMarketplaceItem(MARKETPLACE_CATALOG[0])
-            };
-          } else if (lower.includes('github') || lower.includes('git')) {
-            reply = 'For GitHub repository automation, I recommend @modelcontextprotocol/server-github.';
-            actionBtn = {
-              label: '+ Add GitHub MCP',
-              onClick: () => handleAddMarketplaceItem(MARKETPLACE_CATALOG[1])
-            };
-          } else if (lower.includes('scaffold') || lower.includes('create') || lower.includes('new plugin')) {
-            setCopilotTab('creator');
-            reply = 'Switched to Creator Scaffolder. Fill in your plugin details and click Scaffold.';
-          } else if (lower.includes('standard') || lower.includes('agent')) {
-            const presetNode = nodes.find(n => n.id === 'preset:standard');
-            if (presetNode) setSelectedNode(presetNode);
-            reply = 'Selected Standard Agent. It connects core dispatch to tools and skills.';
-          } else {
-            reply = 'You can ask me to "auto-arrange nodes", "add postgres", "scaffold new plugin", or drag cables between handles on the canvas.';
-          }
-
-          setChatMessages(prev => [...prev, { role: 'assistant', text: reply, actionBtn }]);
-        }, 200);
-      };
-
+    // ---------- Node card (n8n-style with input/output port dots) ----------
+    function NodeCard({ n, pos, selected, onDown, onClick }) {
+      const t = TYPE[n.type] || TYPE.plugin;
+      const locked = n.editable === false;
+      const dim = n.state === 'disabled';
       return h('div', {
+        onPointerDown: (e) => onDown(e, n), onClick: (e) => { e.stopPropagation(); onClick(n); },
+        title: locked ? (n.lockReason || 'Read-only') : 'Editable',
         style: {
-          position: embedded ? 'relative' : 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          width: '100%',
-          height: '100%',
-          backgroundColor: THEME.bg,
-          color: THEME.textPrimary,
-          zIndex: embedded ? 1 : 9999,
-          display: 'flex',
-          flexDirection: 'column',
-          fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-          userSelect: 'none'
+          position: 'absolute', left: pos.x, top: pos.y, width: NW, height: NH, boxSizing: 'border-box', cursor: 'grab',
+          background: C.surface, borderRadius: 10, padding: '8px 12px', userSelect: 'none',
+          border: `1px ${n.type === 'draft' ? 'dashed' : 'solid'} ${selected ? C.accent : C.border}`,
+          boxShadow: selected ? `0 0 0 2px ${C.accent}88, 0 4px 12px rgba(0,0,0,.35)` : '0 2px 6px rgba(0,0,0,.25)',
+          borderLeft: `5px solid ${t.c}`, opacity: dim ? 0.55 : 1, transition: 'border-color 0.15s, box-shadow 0.15s',
+        },
+      },
+        // n8n-style input/output port dots
+        h('span', { style: { position: 'absolute', left: -6, top: '50%', marginTop: -5, width: 10, height: 10, borderRadius: '50%', background: C.surface, border: `2px solid ${t.c}`, pointerEvents: 'none' } }),
+        h('span', { style: { position: 'absolute', right: -6, top: '50%', marginTop: -5, width: 10, height: 10, borderRadius: '50%', background: C.surface, border: `2px solid ${t.c}`, pointerEvents: 'none' } }),
+        h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'space-between' } },
+          h('span', { style: { color: C.text, fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, n.label),
+          h('span', { style: { fontSize: 11, color: locked ? C.muted : C.ok } }, locked ? '🔒' : '✎')),
+        h('div', { style: { display: 'flex', gap: 5, marginTop: 5, alignItems: 'center' } },
+          Badge(t.l, t.c),
+          n.state && n.state !== 'active' && Badge(n.state, n.state === 'error' ? C.danger : C.warn),
+          n.tools && Badge(`${n.tools.length} tools`, C.text2)),
+        h('div', { style: { color: C.muted, fontSize: 10, marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, n.package || ''));
+    }
+
+    // ---------- Settings editor ----------
+    function ConfigEditor({ node, staged, onStage }) {
+      const base = node.config || {};
+      const existing = staged.find((s) => s.op === 'setConfig' && s.node === node.id);
+      const [draft, setDraft] = useState(() => ({ ...base, ...(existing?.patch || {}) }));
+      const [newKey, setNewKey] = useState('');
+      useEffect(() => { setDraft({ ...base, ...(existing?.patch || {}) }); }, [node.id]);
+      const locked = node.editable === false;
+      const set = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+      const keys = Object.keys(draft);
+      const diff = {};
+      for (const k of keys) if (JSON.stringify(draft[k]) !== JSON.stringify(base[k])) diff[k] = draft[k];
+      const field = (k) => {
+        const v = draft[k];
+        const secret = v === MASK || /key|token|secret|password/i.test(k);
+        const row = (ctl) => h('label', { key: k, style: { display: 'block', marginBottom: 8 } },
+          h('div', { style: { fontSize: 11, color: C.text2, marginBottom: 3 } }, k, v === MASK ? ' (stored secret)' : ''), ctl);
+        if (typeof v === 'boolean') return row(h('input', { type: 'checkbox', checked: v, disabled: locked, onChange: (e) => set(k, e.target.checked) }));
+        if (typeof v === 'number') return row(h('input', { style: input(), type: 'number', value: v, disabled: locked, onChange: (e) => set(k, Number(e.target.value)) }));
+        if (v && typeof v === 'object') {
+          return row(h('textarea', {
+            style: input({ minHeight: 70, fontFamily: 'monospace' }), disabled: locked, defaultValue: JSON.stringify(v, null, 2),
+            onBlur: (e) => { try { set(k, JSON.parse(e.target.value)); e.target.style.borderColor = ''; } catch { e.target.style.borderColor = 'red'; } },
+          }));
         }
-      },
-        // --- Top Navigation & Control Bar ---
-        h('div', {
-          style: {
-            height: 48,
-            backgroundColor: THEME.surface,
-            borderBottom: '1px solid ' + THEME.border,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '0 16px',
-            zIndex: 100
-          }
-        },
-          // Left Brand & Status
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
-            h('div', {
-              style: {
-                display: 'flex', alignItems: 'center', gap: 6,
-                fontWeight: 700, fontSize: 14, color: THEME.textPrimary
-              }
-            },
-              h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: THEME.accent, strokeWidth: 2.2 },
-                h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1.5 }),
-                h('rect', { x: 15, y: 3, width: 6, height: 6, rx: 1.5 }),
-                h('rect', { x: 9, y: 15, width: 6, height: 6, rx: 1.5 }),
-                h('path', { d: 'M6 9v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9' }),
-                h('path', { d: 'M12 13v2' })
-              ),
-              h('span', null, 'Workflow Studio')
-            ),
-            h('span', {
-              style: {
-                fontSize: 11,
-                padding: '2px 8px',
-                borderRadius: 12,
-                backgroundColor: 'rgba(79, 120, 232, 0.12)',
-                color: THEME.accent,
-                fontWeight: 600
-              }
-            }, nodes.length + ' Nodes • ' + edges.length + ' Connections'),
-            stagedChanges.length > 0 && h('span', {
-              style: {
-                fontSize: 11,
-                padding: '2px 8px',
-                borderRadius: 12,
-                backgroundColor: 'rgba(245, 158, 11, 0.15)',
-                color: THEME.preset,
-                fontWeight: 600
-              }
-            }, '● ' + stagedChanges.length + ' Staged')
-          ),
+        return row(h('input', {
+          style: input(), type: secret ? 'password' : 'text', value: v ?? '', disabled: locked, autoComplete: 'off',
+          placeholder: v === MASK ? 'Leave as is to keep the stored value' : '', onChange: (e) => set(k, e.target.value),
+          onFocus: (e) => { if (v === MASK) e.target.select(); },
+        }));
+      };
+      return h('div', null,
+        locked && h('div', { style: { fontSize: 11, color: C.warn, marginBottom: 8 } }, node.lockReason || 'Read-only'),
+        keys.length === 0 && h('div', { style: { color: C.muted, fontSize: 12, marginBottom: 8 } }, 'No configuration fields.'),
+        keys.map(field),
+        !locked && h('div', { style: { display: 'flex', gap: 6, marginBottom: 10 } },
+          h('input', { style: input(), placeholder: 'New field name (e.g. apiKey)', value: newKey, onChange: (e) => setNewKey(e.target.value) }),
+          h('button', { style: btn(), onClick: () => { if (newKey.trim() && !(newKey in draft)) { set(newKey.trim(), ''); setNewKey(''); } } }, 'Add')),
+        !locked && h('div', { style: { display: 'flex', gap: 6 } },
+          h('button', {
+            style: primary({ opacity: Object.keys(diff).length ? 1 : 0.5 }), disabled: !Object.keys(diff).length,
+            onClick: () => onStage({ op: 'setConfig', node: node.id, patch: diff, label: `Edit ${node.label}: ${Object.keys(diff).join(', ')}` }),
+          }, 'Stage changes'),
+          existing && h('button', { style: btn(), onClick: () => onStage({ op: 'unstage', key: existing.key }) }, 'Discard staged')));
+    }
 
-          // Center Actions & Tools
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-            h('button', {
-              onClick: handleAutoArrange,
-              style: topBtnStyle(false),
-              title: 'Re-align all nodes into collision-free topological tiers'
-            }, '⚡ Auto-Arrange'),
+    // ---------- Inspector ----------
+    function Inspector({ sel, staged, onStage, onClose, onAsk, inCompare, onCompare }) {
+      const [tab, setTab] = useState('about');
+      useEffect(() => setTab('about'), [sel?.id]);
+      if (!sel) return null;
+      const isMarket = sel.__market;
+      const item = sel;
+      const t = TYPE[isMarket ? 'plugin' : sel.type] || TYPE.plugin;
+      const tabs = isMarket ? ['about'] : ['about', 'settings'];
+      return h('div', { style: { width: 320, background: C.surface, borderLeft: `1px solid ${C.border}`, overflow: 'auto', padding: 14, flexShrink: 0 } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          h('div', { style: { fontSize: 15, fontWeight: 700, color: C.text } }, isMarket ? (item.title || item.name) : item.label),
+          h('button', { style: btn({ padding: '1px 7px' }), onClick: onClose, 'aria-label': 'Close' }, '×')),
+        h('div', { style: { display: 'flex', gap: 5, margin: '6px 0 10px', flexWrap: 'wrap' } },
+          Badge(isMarket ? item.kind : t.l, t.c), isMarket && Badge(item.source, C.text2), isMarket && item.official && Badge('official', C.ok),
+          isMarket && item.deprecated && Badge('deprecated', C.danger),
+          !isMarket && Badge(item.editable === false ? 'read-only' : 'editable', item.editable === false ? C.muted : C.ok),
+          !isMarket && item.state && Badge(item.state, item.state === 'active' ? C.ok : C.warn)),
+        h('div', { style: { display: 'flex', gap: 4, marginBottom: 10 } },
+          tabs.map((x) => h('button', { key: x, style: btn({ background: tab === x ? C.accent : C.surface2, color: tab === x ? '#fff' : C.text }), onClick: () => setTab(x) }, x === 'about' ? 'About' : 'Settings'))),
+        tab === 'about' && h('div', { style: { fontSize: 12, color: C.text2, lineHeight: 1.5 } },
+          h('p', { style: { margin: '0 0 8px', color: C.text } }, item.description || 'No description available.'),
+          h('dl', { style: { margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '3px 10px' } },
+            ...(isMarket
+              ? [['Package', item.name], ['Version', item.version], ['Author', item.author], ['Home', item.homepage || item.repository]]
+              : [['Package', item.package], ['Origin', item.origin], ['Bundle', item.bundle], ['Row id', item.rowId], ['Path', item.path]])
+              .filter(([, v]) => v).flatMap(([k, v]) => [h('dt', { key: k, style: { color: C.muted } }, k), h('dd', { key: k + 'v', style: { margin: 0, color: C.text, wordBreak: 'break-all' } }, String(v))])),
+          item.tools?.length > 0 && h('div', { style: { marginTop: 10 } }, h('div', { style: { color: C.muted, marginBottom: 4 } }, 'Tools exposed'),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } }, item.tools.slice(0, 40).map((x) => Badge(x, C.mcp)))),
+          item.presetPlugins?.length > 0 && h('div', { style: { marginTop: 10 } }, h('div', { style: { color: C.muted, marginBottom: 4 } }, 'Preset contains'),
+            item.presetPlugins.map((p) => h('div', { key: p.id || p.name, style: { color: C.text } }, '• ', p.id || p.name))),
+          isMarket && item.deprecated && h('div', { style: { marginTop: 10, color: C.danger } }, 'Deprecated', item.replacement ? ` — suggested replacement: ${item.replacement}` : ''),
+          isMarket && !item.official && h('div', { style: { marginTop: 10 } }, h('div', { style: { color: C.muted, marginBottom: 4 } }, 'Capabilities (static scan by the catalog; disclosure, not a verdict)'),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } }, CapBadges(item)),
+            item.capabilityRedLines?.length > 0 && h('div', { style: { marginTop: 6, color: C.warn } }, item.capabilityRedLines.map((r) => h('div', { key: r }, '⚠ ', r)))),
+          isMarket && item.envVars?.length > 0 && h('div', { style: { marginTop: 10 } }, h('div', { style: { color: C.muted } }, 'Needs environment variables'),
+            item.envVars.map((e) => h('div', { key: e.name || e, style: { color: C.text } }, '• ', e.name || e))),
+          h('div', { style: { display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap' } },
+            isMarket && item.installable !== false && h('button', { style: primary(), onClick: () => onStage({ op: 'install', item: item.id, itemData: stripMarket(item), label: `Install ${item.title || item.name}` }) }, 'Add to harness'),
+            isMarket && h('button', { style: btn(), onClick: () => onCompare(item) }, inCompare ? 'Remove from compare' : 'Compare'),
+            isMarket && (item.homepage || item.repository) && h('a', { href: item.homepage || item.repository, target: '_blank', rel: 'noopener noreferrer', style: { ...btn(), textDecoration: 'none' } }, 'Open page'),
+            !isMarket && item.editable !== false && item.bundle && h('button', { style: btn(), onClick: () => onStage({ op: 'toggle', node: item.id, enabled: item.state === 'disabled', label: `${item.state === 'disabled' ? 'Enable' : 'Disable'} ${item.label}` }) }, item.state === 'disabled' ? 'Enable' : 'Disable'),
+            !isMarket && item.editable !== false && item.bundle && h('button', { style: btn({ color: C.danger }), onClick: () => onStage({ op: 'remove', node: item.id, label: `Remove ${item.label}` }) }, 'Remove'),
+            !isMarket && item.type === 'draft' && h('button', { style: btn({ color: C.danger }), onClick: async () => { await api('/drafts/clean', { id: item.stagedKey || item.id }); onClose(); } }, 'Clean draft files'),
+            h('button', { style: btn(), onClick: () => onAsk(isMarket ? `Tell me about the marketplace item "${item.title || item.name}" and whether it fits my harness.` : `Explain what the node "${item.label}" (${item.package}) does in my harness.`) }, 'Ask AI'))),
+        tab === 'settings' && !isMarket && h(ConfigEditor, { node: sel, staged, onStage }));
+    }
+    const stripMarket = (i) => { if (!i) return {}; const { __market, ...rest } = i; return rest; };
 
-            h('button', {
-              onClick: () => setActiveDrawer(activeDrawer === 'market' ? null : 'market'),
-              style: topBtnStyle(activeDrawer === 'market')
-            }, '+ Add Component'),
-
-            h('button', {
-              onClick: () => setActiveDrawer(activeDrawer === 'copilot' ? null : 'copilot'),
-              style: topBtnStyle(activeDrawer === 'copilot')
-            }, '✨ AI Copilot'),
-
-            h('button', {
-              onClick: () => setActiveDrawer(activeDrawer === 'diff' ? null : 'diff'),
-              style: {
-                ...topBtnStyle(activeDrawer === 'diff'),
-                borderColor: stagedChanges.length > 0 ? THEME.preset : THEME.border
-              }
-            }, 'Review Diff (' + stagedChanges.length + ')')
-          ),
-
-          // Right Controls
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-            !embedded && h('button', {
-              onClick: onClose,
-              style: { ...topBtnStyle(false), color: THEME.textSecondary }
-            }, 'Close')
-          )
-        ),
-
-        // --- Studio Main Workspace ---
-        h('div', {
-          style: { flex: 1, display: 'flex', position: 'relative', overflow: 'hidden' },
-          onMouseMove: handleMouseMove,
-          onMouseUp: handleMouseUp,
-          onMouseLeave: handleMouseUp
-        },
-          // --- SVG Infinite Canvas Area ---
-          h('div', {
-            id: 'canvas-bg',
-            onMouseDown: handleCanvasMouseDown,
-            style: {
-              flex: 1,
-              position: 'relative',
-              cursor: isPanning ? 'grabbing' : draggedNodeId ? 'grabbing' : wiringStart ? 'crosshair' : 'grab',
-              overflow: 'hidden'
-            }
+    // ---------- Marketplace drawer ----------
+    function Market({ onPick, selectedId, items, status, loading, kind, setKind, query, setQuery, run, compare, links = [] }) {
+      return h('div', { style: { width: 300, background: C.surface, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0 } },
+        h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}` } },
+          h('div', { style: { fontWeight: 700, color: C.text, marginBottom: 8 } }, 'Marketplace'),
+          h('form', { onSubmit: (e) => { e.preventDefault(); run(); }, style: { display: 'flex', gap: 6 } },
+            h('input', { style: input(), placeholder: 'Search plugins, MCP, skills…', value: query, onChange: (e) => setQuery(e.target.value) }),
+            h('button', { style: primary(), type: 'submit' }, 'Go')),
+          h('div', { style: { display: 'flex', gap: 4, marginTop: 8 } },
+            ['all', 'plugin', 'mcp', 'skill'].map((k) => h('button', { key: k, style: btn({ padding: '3px 8px', background: kind === k ? C.accent : C.surface2, color: kind === k ? '#fff' : C.text }), onClick: () => setKind(k) }, k))),
+          status && h('div', { style: { fontSize: 10, color: C.muted, marginTop: 6 } },
+            Object.entries(status).map(([k, v]) => `${k}: ${v === true || v === 'ok' ? 'ok' : (v?.error || v)}`).join(' · ')),
+          links.length > 0 && h('div', { style: { fontSize: 10, color: C.muted, marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 } }, 'Browse:',
+            links.map((l) => h('a', { key: l.url, href: l.url, target: '_blank', rel: 'noopener noreferrer', style: { color: C.accent } }, l.name)))),
+        h('div', { style: { overflow: 'auto', flex: 1, padding: 8 } },
+          loading && h('div', { style: { color: C.muted, fontSize: 12 } }, 'Searching…'),
+          !loading && items.length === 0 && h('div', { style: { color: C.muted, fontSize: 12 } }, 'No results. Try another search.'),
+          items.map((i) => h('div', {
+            key: i.id, onClick: () => onPick(i),
+            style: { padding: 8, borderRadius: 8, marginBottom: 6, cursor: 'pointer', background: selectedId === i.id ? C.surface2 : 'transparent', border: `1px solid ${selectedId === i.id ? C.accent : C.border}` },
           },
-            // Zoom & Canvas Controls Overlay
-            h('div', {
-              style: {
-                position: 'absolute',
-                bottom: 20,
-                left: 20,
-                display: 'flex',
-                gap: 4,
-                backgroundColor: THEME.surface,
-                padding: '4px 6px',
-                borderRadius: 6,
-                border: '1px solid ' + THEME.border,
-                zIndex: 50
-              }
-            },
-              h('button', { onClick: () => setScale(s => Math.min(2, s + 0.15)), style: zoomBtnStyle }, '+'),
-              h('button', { onClick: () => setScale(s => Math.max(0.4, s - 0.15)), style: zoomBtnStyle }, '-'),
-              h('button', { onClick: () => { setScale(1); setPan({ x: 60, y: 40 }); }, style: zoomBtnStyle }, 'Reset')
-            ),
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 6 } },
+              h('span', { style: { color: C.text, fontSize: 12, fontWeight: 600 } }, i.title || i.name),
+              compare.includes(i.id) && Badge('compare', C.accent)),
+            h('div', { style: { display: 'flex', gap: 4, margin: '4px 0' } }, Badge(i.kind, (TYPE[i.kind === 'plugin' ? 'plugin' : i.kind] || TYPE.plugin).c), Badge(i.source, C.text2), i.official && Badge('official', C.ok), i.deprecated && Badge('deprecated', C.danger), i.capabilities?.some((c) => RISKY_CAPS.test(c)) && Badge('needs review', C.warn)),
+            h('div', { style: { color: C.text2, fontSize: 11, lineHeight: 1.4, maxHeight: 48, overflow: 'hidden' } }, i.description)))));
+    }
 
-            // SVG Surface
-            h('svg', {
-              style: {
-                width: '100%',
-                height: '100%',
-                transform: 'translate(' + pan.x + 'px, ' + pan.y + 'px) scale(' + scale + ')',
-                transformOrigin: '0 0'
-              }
-            },
-              // Dot Grid Pattern definition
-              h('defs', null,
-                h('pattern', { id: 'dot-grid', width: 24, height: 24, patternUnits: 'userSpaceOnUse' },
-                  h('circle', { cx: 2, cy: 2, r: 1.2, fill: THEME.gridDot })
-                )
-              ),
-              h('rect', { x: -3000, y: -3000, width: 9000, height: 9000, fill: 'url(#dot-grid)' }),
+    // ---------- Changes panel ----------
+    function Changes({ staged, onUnstage, onApply, applying, results, onClose }) {
+      return h('div', { style: { position: 'absolute', right: 12, top: 52, width: 380, maxHeight: '70%', overflow: 'auto', background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, zIndex: 20, boxShadow: '0 8px 30px rgba(0,0,0,.4)' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 8 } }, h('b', { style: { color: C.text } }, `Staged changes (${staged.length})`), h('button', { style: btn({ padding: '1px 7px' }), onClick: onClose }, '×')),
+        staged.length === 0 && h('div', { style: { color: C.muted, fontSize: 12 } }, 'Nothing staged. Edit a node or add something from the marketplace.'),
+        staged.map((s) => h('div', { key: s.key, style: { border: `1px solid ${C.border}`, borderRadius: 8, padding: 8, marginBottom: 6 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 6 } }, h('span', { style: { color: C.text, fontSize: 12 } }, s.label || s.op), h('button', { style: btn({ padding: '0 6px' }), onClick: () => onUnstage(s.key) }, 'Undo')),
+          s.op === 'setConfig' && h('pre', { style: { margin: '6px 0 0', fontSize: 11, color: C.text2, whiteSpace: 'pre-wrap' } }, Object.entries(s.patch).map(([k, v]) => `+ ${k}: ${v === MASK ? MASK : JSON.stringify(v)}`).join('\n')),
+          s.op === 'scaffold' && h('div', { style: { fontSize: 11, color: C.text2, marginTop: 4 } }, `Writes a draft bundle (${s.spec.type}) under the studio drafts folder${s.install ? ' and installs it' : ''}.`),
+          s.op === 'install' && s.itemData?.installSpec && h('div', { style: { fontSize: 11, color: C.text2, marginTop: 4 } }, `Installs ${s.itemData.installSpec} (runs third-party code in the Host).`))),
+        results && h('div', { style: { marginTop: 8 } }, results.map((r, i) => h('div', { key: i, style: { fontSize: 12, color: r.ok ? C.ok : C.danger, marginBottom: 3 } }, `${r.ok ? '✓' : '✗'} ${r.op}: ${r.ok ? (r.detail || 'done') : r.error}`)),
+          results.some((r) => r.ok) && h('div', { style: { fontSize: 11, color: C.text2 } }, 'Package changes may need a restart or a plugin reload to take effect.')),
+        staged.length > 0 && h('button', { style: primary({ marginTop: 6, width: '100%' }), disabled: applying, onClick: onApply }, applying ? 'Applying…' : 'Apply to harness'));
+    }
 
-              // --- Spline Edges ---
-              edges.map(e => {
-                const src = nodes.find(n => n.id === e.from);
-                const dst = nodes.find(n => n.id === e.to);
-                if (!src || !dst) return null;
-
-                const startX = (src.x || 0) + 210;
-                const startY = (src.y || 0) + 41;
-                const endX = dst.x || 0;
-                const endY = (dst.y || 0) + 41;
-
-                const dx = Math.max(60, Math.abs(endX - startX) * 0.45);
-                const pathD = 'M ' + startX + ' ' + startY + ' C ' + (startX + dx) + ' ' + startY + ', ' + (endX - dx) + ' ' + endY + ', ' + endX + ' ' + endY;
-                const midX = (startX + endX) / 2;
-                const midY = (startY + endY) / 2;
-                const isSelectedEdge = selectedEdgeId === e.id;
-
-                return h('g', {
-                  key: e.id,
-                  style: { cursor: 'pointer' },
-                  onClick: (ev) => {
-                    ev.stopPropagation();
-                    setSelectedEdgeId(e.id);
-                  }
-                },
-                  // Wide invisible stroke for easy clicking/hovering
-                  h('path', { d: pathD, stroke: 'transparent', strokeWidth: 16, fill: 'none' }),
-                  // Shadow / Halo path
-                  h('path', { d: pathD, stroke: 'rgba(0,0,0,0.5)', strokeWidth: isSelectedEdge ? 6 : 4, fill: 'none' }),
-                  // Active bezier spline
-                  h('path', {
-                    d: pathD,
-                    stroke: isSelectedEdge ? '#f43f5e' : (e.type === 'draft' || e.type === 'user') ? THEME.draft : THEME.accent,
-                    strokeWidth: isSelectedEdge ? 3 : 2,
-                    strokeDasharray: (e.type === 'draft' || e.type === 'user') ? '5 4' : undefined,
-                    fill: 'none'
-                  }),
-                  // Selected Edge Delete Badge
-                  isSelectedEdge && h('g', {
-                    transform: 'translate(' + midX + ', ' + midY + ')',
-                    onClick: (ev) => {
-                      ev.stopPropagation();
-                      handleDeleteEdge(e.id);
-                    }
-                  },
-                    h('circle', { cx: 0, cy: 0, r: 10, fill: '#f43f5e', stroke: THEME.bg, strokeWidth: 2 }),
-                    h('text', { x: 0, y: 0, textAnchor: 'middle', dominantBaseline: 'central', fill: '#fff', fontSize: 11, fontWeight: 700 }, '✕')
-                  )
-                );
-              }),
-
-              // Live Wiring Preview Spline
-              wiringStart && (() => {
-                const dx = Math.max(40, Math.abs(wiringMouse.x - wiringStart.x) * 0.5);
-                const previewPath = 'M ' + wiringStart.x + ' ' + wiringStart.y + ' C ' + (wiringStart.x + dx) + ' ' + wiringStart.y + ', ' + (wiringMouse.x - dx) + ' ' + wiringMouse.y + ', ' + wiringMouse.x + ' ' + wiringMouse.y;
-                return h('g', null,
-                  h('path', { d: previewPath, stroke: 'rgba(0,0,0,0.5)', strokeWidth: 4, fill: 'none' }),
-                  h('path', {
-                    d: previewPath,
-                    stroke: THEME.accent,
-                    strokeWidth: 2.5,
-                    strokeDasharray: '6 4',
-                    fill: 'none'
-                  }),
-                  h('circle', { cx: wiringMouse.x, cy: wiringMouse.y, r: 5, fill: THEME.accent, stroke: '#fff', strokeWidth: 2 })
-                );
-              })(),
-
-              // --- n8n-Style Node Cards ---
-              nodes.map(node => {
-                const isSelected = selectedNode?.id === node.id;
-                const isDragged = draggedNodeId === node.id;
-
-                let categoryColor = THEME.tool;
-                let categoryLabel = 'TOOL';
-                let iconChar = '⚡';
-
-                if (node.type === 'core') {
-                  categoryColor = THEME.core;
-                  categoryLabel = 'CORE SERVICE';
-                  iconChar = '⚙';
-                } else if (node.type === 'preset') {
-                  categoryColor = THEME.preset;
-                  categoryLabel = 'AGENT PRESET';
-                  iconChar = '👤';
-                } else if (node.type === 'skill') {
-                  categoryColor = THEME.skill;
-                  categoryLabel = 'SKILL';
-                  iconChar = '📖';
-                } else if (node.type === 'mcp') {
-                  categoryColor = THEME.mcp;
-                  categoryLabel = 'MCP SERVER';
-                  iconChar = '🔌';
-                } else if (node.type === 'draft') {
-                  categoryColor = THEME.draft;
-                  categoryLabel = 'DRAFT';
-                  iconChar = '✨';
+    // ---------- AI panel ----------
+    function AiPanel({ open, setOpen, selected, market, onStageAction, seed, clearSeed, compareItems }) {
+      const [msgs, setMsgs] = useState([]);
+      const [text, setText] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [models, setModels] = useState({ models: [], current: '' });
+      const [model, setModel] = useState('');
+      const [settings, setSettings] = useState(null);
+      const [showCfg, setShowCfg] = useState(false);
+      const [cfg, setCfg] = useState({ baseUrl: '', apiKey: '' });
+      const endRef = useRef(null);
+      const load = useCallback(async () => {
+        try { const s = await api('/ai/settings'); setSettings(s); setCfg({ baseUrl: s.baseUrl || '', apiKey: s.apiKey || '' }); } catch { /* ignore */ }
+        try { const m = await api('/ai/models'); setModels(m); setModel((cur) => cur || m.current || 'deepseek-chat'); } catch { /* ignore */ }
+      }, []);
+      useEffect(() => { load(); }, [load]);
+      useEffect(() => { endRef.current?.scrollIntoView?.({ block: 'end' }); }, [msgs, busy]);
+      const send = useCallback(async (content) => {
+        if (!content.trim() || busy) return;
+        const next = [...msgs, { role: 'user', content }];
+        setMsgs(next); setText(''); setBusy(true);
+        try {
+          const r = await api('/ai/chat', {
+            messages: next, model,
+            selected: selected ? { id: selected.id, label: selected.label || selected.title, package: selected.package || selected.name } : null,
+            market: (market || []).filter(Boolean).map(stripMarket),
+          });
+          setMsgs([...next, { role: 'assistant', content: r.text || '(no text)', actions: r.actions || [], model: r.model }]);
+        } catch (e) {
+          setMsgs([...next, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]);
+          if (/key/i.test(e.message)) setShowCfg(true);
+        } finally { setBusy(false); }
+      }, [msgs, busy, model, selected, market]);
+      useEffect(() => { if (seed && open) { send(seed); clearSeed(); } }, [seed, open]);
+      if (!open) return h('button', { style: btn({ position: 'absolute', right: 12, bottom: 12, zIndex: 10 }), onClick: () => setOpen(true) }, '✦ AI');
+      const describe = (a) => {
+        if (a.op === 'install') return `Install ${a.item}`;
+        if (a.op === 'setConfig') return `Set ${Object.keys(a.patch || {}).join(', ')} on ${a.node}`;
+        if (a.op === 'toggle') return `${a.enabled === false ? 'Disable' : 'Enable'} ${a.node}`;
+        if (a.op === 'remove') return `Remove ${a.node}`;
+        if (a.op === 'scaffold') return `Create ${a.spec?.type} “${a.spec?.title || a.spec?.name}”`;
+        if (a.op === 'compare') return `Compare ${(a.items || []).join(' vs ')}`;
+        return a.op;
+      };
+      return h('div', { style: { width: 340, background: C.surface, borderLeft: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0 } },
+        h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 6, alignItems: 'center' } },
+          h('b', { style: { color: C.text, flex: 1 } }, '✦ Assistant'),
+          h('select', { style: input({ width: 130 }), value: model, onChange: (e) => setModel(e.target.value), 'aria-label': 'Model' },
+            (models.models.length ? models.models : [model || 'deepseek-chat']).map((m) => h('option', { key: m, value: m }, m))),
+          h('button', { style: btn({ padding: '3px 7px' }), title: 'AI settings', onClick: () => setShowCfg((v) => !v) }, '⚙'),
+          h('button', { style: btn({ padding: '3px 7px' }), title: 'Collapse', onClick: () => setOpen(false) }, '»')),
+        showCfg && h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}` } },
+          h('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, settings?.hasKey ? `API key set (${settings.keySource}).` : 'No API key set. DeepSeek is the default provider.'),
+          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Base URL'),
+          h('input', { style: input({ marginBottom: 6 }), value: cfg.baseUrl, onChange: (e) => setCfg({ ...cfg, baseUrl: e.target.value }), placeholder: 'https://api.deepseek.com' }),
+          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Model'),
+          h('input', { style: input({ marginBottom: 6 }), value: model, onChange: (e) => setModel(e.target.value), placeholder: 'deepseek-chat' }),
+          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'API Key'),
+          h('input', { style: input({ marginBottom: 6 }), type: 'password', autoComplete: 'off', value: cfg.apiKey, onChange: (e) => setCfg({ ...cfg, apiKey: e.target.value }), onFocus: (e) => e.target.select() }),
+          h('button', { style: primary(), onClick: async () => { try { const s = await api('/ai/settings', { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model }); setSettings(s); setShowCfg(false); load(); } catch (e) { setMsgs((m) => [...m, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]); } } }, 'Save'),
+          h('div', { style: { fontSize: 10, color: C.muted, marginTop: 6 } }, 'Default is DeepSeek (https://api.deepseek.com). Settings are stored locally with owner-only permissions.')),
+        h('div', { style: { flex: 1, overflow: 'auto', padding: 10 } },
+          !settings?.hasKey && h('div', { style: { margin: '0 0 10px', padding: 10, borderRadius: 8, background: `${C.warn}18`, border: `1px solid ${C.warn}50` } },
+            h('div', { style: { fontWeight: 600, color: C.warn, fontSize: 12, marginBottom: 4 } }, 'Assistant API Key Required'),
+            h('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, 'Enter an API key (DeepSeek or OpenRouter) to enable chat:'),
+            h('div', { style: { display: 'flex', gap: 6 } },
+              h('input', { style: input({ flex: 1 }), type: 'password', placeholder: 'sk-...', value: cfg.apiKey, onChange: (e) => setCfg({ ...cfg, apiKey: e.target.value }) }),
+              h('button', { style: primary({ flexShrink: 0, padding: '4px 10px' }), onClick: async () => {
+                try {
+                  const s = await api('/ai/settings', { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model });
+                  setSettings(s);
+                  load();
+                } catch (e) {
+                  setMsgs((m) => [...m, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]);
                 }
+              } }, 'Save Key'))),
+          msgs.length === 0 && h('div', { style: { color: C.muted, fontSize: 12, lineHeight: 1.5 } },
+            'Ask about your harness, compare marketplace items, or have me design a plugin, MCP connection or skill. Changes I propose are only staged; you review and apply them.',
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, marginTop: 10 } },
+              [['Compare marketplace items', compareItems.length ? `Compare these marketplace items for my harness and recommend one: ${compareItems.map((i) => i.id).join(', ')}` : 'Compare the top marketplace results for my current search and recommend one.'],
+                ['Create a plugin', 'Help me create a new plugin. Ask what it should do, then propose a scaffold.'],
+                ['Audit my harness', 'Review my current harness graph and point out risks or redundant plugins.']].map(([l, p]) => h('button', { key: l, style: btn({ textAlign: 'left' }), onClick: () => send(p) }, l)))),
+          msgs.map((m, i) => h('div', { key: i, style: { marginBottom: 10, textAlign: m.role === 'user' ? 'right' : 'left' } },
+            h('div', { style: { display: 'inline-block', maxWidth: '95%', textAlign: 'left', padding: '7px 10px', borderRadius: 10, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', background: m.role === 'user' ? C.accent : C.surface2, color: m.role === 'user' ? '#fff' : (m.error ? C.danger : C.text) } }, m.content),
+            m.actions?.length > 0 && h('div', { style: { marginTop: 6 } }, m.actions.map((a, j) => h('div', { key: j, style: { display: 'flex', gap: 6, alignItems: 'center', border: `1px solid ${C.border}`, borderRadius: 8, padding: '5px 8px', marginBottom: 4, fontSize: 12, color: C.text } },
+              h('span', { style: { flex: 1 } }, describe(a)), a.op !== 'compare' && h('button', { style: primary({ padding: '2px 8px' }), onClick: () => onStageAction(a) }, 'Stage')))))),
+          busy && h('div', { style: { color: C.muted, fontSize: 12 } }, 'Thinking…'), h('div', { ref: endRef })),
+        h('form', { style: { padding: 10, borderTop: `1px solid ${C.border}`, display: 'flex', gap: 6 }, onSubmit: (e) => { e.preventDefault(); send(text); } },
+          h('input', { style: input(), value: text, placeholder: selected ? `Ask about ${selected.label || selected.title || selected.name}…` : 'Ask anything…', onChange: (e) => setText(e.target.value) }),
+          h('button', { style: primary(), type: 'submit', disabled: busy }, 'Send')));
+    }
 
-                return h('g', {
-                  key: node.id,
-                  transform: 'translate(' + (node.x || 0) + ', ' + (node.y || 0) + ')',
-                  onMouseDown: (e) => handleNodeMouseDown(e, node),
-                  style: { cursor: isDragged ? 'grabbing' : 'grab' }
-                },
-                  // Card Drop Shadow & Card Frame
-                  h('rect', {
-                    width: 210,
-                    height: 82,
-                    rx: 8,
-                    fill: isSelected ? THEME.surfaceSelected : THEME.surface,
-                    stroke: isSelected ? THEME.accent : isDragged ? THEME.borderHover : THEME.border,
-                    strokeWidth: isSelected ? 2 : 1,
-                    filter: 'drop-shadow(0px 4px 10px rgba(0,0,0,0.35))'
-                  }),
+    // ---------- Main app ----------
+    let keySeq = 0;
+    function StudioApp() {
+      const [graph, setGraph] = useState({ nodes: [], edges: [], sources: {} });
+      const [err, setErr] = useState('');
+      const [loading, setLoading] = useState(true);
+      const [pos, setPos] = useState(() => lsGet('dsh-studio-pos', {}));
+      const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+      const [sel, setSel] = useState(null);
+      const [marketOpen, setMarketOpen] = useState(true);
+      const [aiOpen, setAiOpen] = useState(() => lsGet('dsh-studio-ai', true));
+      const [q, setQ] = useState('');
+      const [kind, setKind] = useState('all');
+      const [mItems, setMItems] = useState([]);
+      const [mStatus, setMStatus] = useState(null);
+      const [mLoading, setMLoading] = useState(false);
+      const [mLinks, setMLinks] = useState([]);
+      const [compare, setCompare] = useState([]);
+      const [staged, setStaged] = useState([]);
+      const [showChanges, setShowChanges] = useState(false);
+      const [applying, setApplying] = useState(false);
+      const [results, setResults] = useState(null);
+      const [seed, setSeed] = useState('');
+      const [filter, setFilter] = useState('');
+      const wrap = useRef(null);
+      const drag = useRef(null);
 
-                  // Left Category Color Stripe
-                  h('path', {
-                    d: 'M 0 8 Q 0 0 8 0 L 8 82 Q 0 82 0 74 Z',
-                    fill: categoryColor
-                  }),
+      const refresh = useCallback(async () => {
+        setLoading(true);
+        try { setGraph(await api('/graph')); setErr(''); } catch (e) { setErr(e.message); } finally { setLoading(false); }
+      }, []);
+      useEffect(() => { refresh(); }, [refresh]);
+      useEffect(() => { lsSet('dsh-studio-ai', aiOpen); }, [aiOpen]);
 
-                  // Icon Tile Box
-                  h('rect', {
-                    x: 14, y: 14, width: 26, height: 26, rx: 6,
-                    fill: 'rgba(255, 255, 255, 0.05)',
-                    stroke: 'rgba(255, 255, 255, 0.08)',
-                    strokeWidth: 1
-                  }),
-                  h('text', {
-                    x: 27, y: 31,
-                    textAnchor: 'middle',
-                    fill: categoryColor,
-                    fontSize: 13,
-                    fontWeight: 700
-                  }, iconChar),
+      const runMarket = useCallback(async () => {
+        setMLoading(true);
+        try { const r = await api('/market', { query: q, kind }); setMItems(r.items || []); setMStatus(r.status || null); setMLinks(r.links || []); } catch (e) { setMStatus({ error: e.message }); } finally { setMLoading(false); }
+      }, [q, kind]);
+      useEffect(() => { runMarket(); }, [kind]);
 
-                  // Category Label Pill
-                  h('text', {
-                    x: 48, y: 22,
-                    fill: categoryColor,
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: 0.5
-                  }, categoryLabel),
+      // staged installs/scaffolds appear as draft nodes
+      const draftNodes = useMemo(() => staged.filter((s) => s.op === 'install' || s.op === 'scaffold').map((s) => ({
+        id: `draft:${s.key}`, label: s.op === 'install' ? (s.itemData?.title || s.item) : (s.spec?.title || s.spec?.name), type: 'draft', package: s.op === 'install' ? s.itemData?.name : s.spec?.type, editable: true, state: 'staged', description: 'Staged, not applied yet.', stagedKey: s.key,
+      })), [staged]);
+      const allNodes = useMemo(() => [...graph.nodes, ...draftNodes], [graph, draftNodes]);
+      const auto = useMemo(() => autoLayout(allNodes), [allNodes]);
+      const cleanPos = useMemo(() => sanitizePositions(pos, allNodes), [pos, allNodes]);
+      const P = (id) => cleanPos[id] || auto[id] || { x: 0, y: 0 };
+      const shown = useMemo(() => { const f = filter.trim().toLowerCase(); return f ? new Set(allNodes.filter((n) => `${n.label} ${n.package} ${n.type}`.toLowerCase().includes(f)).map((n) => n.id)) : null; }, [filter, allNodes]);
 
-                  // Node Main Title
-                  h('text', {
-                    x: 48, y: 38,
-                    fill: THEME.textPrimary,
-                    fontSize: 12,
-                    fontWeight: 600
-                  }, node.label.length > 20 ? node.label.substring(0, 18) + '…' : node.label),
+      const stage = useCallback((c) => {
+        if (c.op === 'unstage') { setStaged((s) => s.filter((x) => x.key !== c.key)); return; }
+        setStaged((s) => {
+          const key = c.op === 'setConfig' ? `cfg:${c.node}` : c.op === 'toggle' || c.op === 'remove' ? `${c.op}:${c.node}` : `k${++keySeq}`;
+          return [...s.filter((x) => x.key !== key), { ...c, key }];
+        });
+        setResults(null); setShowChanges(true);
+      }, []);
+      const stageAction = useCallback((a) => {
+        if (a.op === 'install') {
+          const item = mItems.find((i) => i.id === a.item);
+          if (!item) { setSeed(`I could not find marketplace item "${a.item}" in the current results. Search for it first.`); return; }
+          stage({ op: 'install', item: item.id, itemData: stripMarket(item), label: `Install ${item.title || item.name}` });
+        } else if (a.op === 'scaffold') stage({ op: 'scaffold', spec: a.spec || {}, label: `Create ${a.spec?.title || a.spec?.name || 'plugin'}` });
+        else if (['setConfig', 'toggle', 'remove'].includes(a.op)) stage({ ...a, label: `${a.op} ${a.node}` });
+      }, [mItems, stage]);
 
-                  // Subtitle / Package Name
-                  h('text', {
-                    x: 48, y: 52,
-                    fill: THEME.textSecondary,
-                    fontSize: 9
-                  }, (node.fullPackage || '').replace('@deepseek-ai/', '')),
+      const apply = useCallback(async () => {
+        setApplying(true);
+        try {
+          const changes = staged.map(({ key, label, ...c }) => c);
+          const r = await api('/apply', { changes });
+          setResults(r.results);
+          setStaged((s) => s.filter((x, i) => !r.results[i]?.ok));
+          refresh();
+        } catch (e) { setResults([{ op: 'apply', ok: false, error: e.message }]); } finally { setApplying(false); }
+      }, [staged, refresh]);
 
-                  // Status Indicator Row
-                  h('circle', {
-                    cx: 52, cy: 68, r: 3,
-                    fill: node.readOnly ? THEME.core : THEME.tool
-                  }),
-                  h('text', {
-                    x: 60, y: 71,
-                    fill: THEME.textMuted,
-                    fontSize: 9,
-                    fontWeight: 500
-                  }, node.readOnly ? 'Locked Core' : node.isDraft ? 'Staged Draft' : 'Active'),
+      // pan / zoom (coordinates relative to the canvas rect)
+      // Infinite canvas: no bounds. Ctrl/Cmd+wheel or a mouse wheel zooms at the cursor; trackpad scroll pans.
+      const zoomAt = (mx, my, factor) => setView((v) => {
+        const k = Math.min(2.5, Math.max(0.15, v.k * factor));
+        return { k, x: mx - ((mx - v.x) / v.k) * k, y: my - ((my - v.y) / v.k) * k };
+      });
+      const onWheel = (e) => {
+        e.preventDefault();
+        const r = wrap.current.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        const mouseNotch = e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50;
+        if (e.ctrlKey || e.metaKey || mouseNotch) zoomAt(mx, my, Math.exp(-Math.max(-60, Math.min(60, e.deltaY)) * (e.ctrlKey ? 0.01 : 0.0025)));
+        else setView((v) => ({ ...v, x: v.x - (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX), y: v.y - (e.shiftKey && !e.deltaX ? 0 : e.deltaY) }));
+      };
+      const zoomBy = (f) => { const r = wrap.current?.getBoundingClientRect(); if (r) zoomAt(r.width / 2, r.height / 2, f); };
+      useEffect(() => { const el = wrap.current; if (!el) return; el.addEventListener('wheel', onWheel, { passive: false }); return () => el.removeEventListener('wheel', onWheel); });
+      // Drag handling uses window-level listeners so panning keeps working when the pointer leaves the canvas
+      // or the host swallows pointer capture. Any mouse button on empty canvas pans.
+      const moved = useRef(false);
+      const startDrag = (d) => {
+        drag.current = d; moved.current = false;
+        const mv = (e) => {
+          const dd = drag.current; if (!dd) return;
+          const dx = e.clientX - dd.sx, dy = e.clientY - dd.sy;
+          if (Math.abs(dx) + Math.abs(dy) > 3) moved.current = true;
+          if (dd.type === 'pan') setView((v) => ({ ...v, x: dd.ox + dx, y: dd.oy + dy }));
+          else setPos((p) => ({ ...p, [dd.id]: { x: dd.ox + dx / dd.k, y: dd.oy + dy / dd.k } }));
+        };
+        const up = () => {
+          window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
+          const dd = drag.current; drag.current = null;
+          if (dd?.type === 'node' && moved.current) setPos((p) => { lsSet('dsh-studio-pos', p); return p; });
+        };
+        window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+      };
+      const onBgDown = (e) => { if (e.button > 1) return; e.preventDefault(); startDrag({ type: 'pan', sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y }); };
+      const onNodeDown = (e, n) => { if (e.button !== 0) return; e.stopPropagation(); e.preventDefault(); const p = P(n.id); startDrag({ type: 'node', id: n.id, sx: e.clientX, sy: e.clientY, ox: p.x, oy: p.y, k: view.k }); };
+      const fit = useCallback(() => {
+        const r = wrap.current?.getBoundingClientRect(); if (!r || !allNodes.length) return;
+        const xs = allNodes.map((n) => P(n.id)); const minX = Math.min(...xs.map((p) => p.x)), maxX = Math.max(...xs.map((p) => p.x + NW)), minY = Math.min(...xs.map((p) => p.y)), maxY = Math.max(...xs.map((p) => p.y + NH));
+        const k = Math.min(1.2, Math.max(0.3, Math.min(r.width / (maxX - minX + 80), r.height / (maxY - minY + 80))));
+        setView({ k, x: (r.width - (maxX - minX) * k) / 2 - minX * k, y: (r.height - (maxY - minY) * k) / 2 - minY * k });
+      }, [allNodes, cleanPos, auto]);
+      useEffect(() => { if (!loading && graph.nodes.length) fit(); }, [loading]);
 
-                  // Left Input Port (Handle) - Drop target for wiring
-                  h('circle', {
-                    cx: 0, cy: 41, r: 6,
-                    fill: THEME.accent,
-                    stroke: THEME.bg,
-                    strokeWidth: 2,
-                    style: { cursor: 'crosshair' },
-                    onMouseUp: (e) => handlePortMouseUp(e, node, 'input')
-                  }),
+      const resetLayout = () => {
+        const fresh = autoLayout(allNodes);
+        setPos(fresh);
+        lsSet('dsh-studio-pos', fresh);
+        setTimeout(fit, 60);
+      };
 
-                  // Right Output Port (Handle) - Drag source for wiring
-                  h('circle', {
-                    cx: 210, cy: 41, r: 6,
-                    fill: categoryColor,
-                    stroke: THEME.bg,
-                    strokeWidth: 2,
-                    style: { cursor: 'crosshair' },
-                    onMouseDown: (e) => handlePortMouseDown(e, node, 'output')
-                  })
-                );
-              })
-            )
-          ),
+      const selectNode = (n) => setSel(n.type === 'draft' ? { ...n } : n);
+      const selectedNode = sel && !sel.__market ? (allNodes.find((n) => n.id === sel.id) || sel) : sel;
+      const edgePath = (e) => {
+        const a = P(e.from), b = P(e.to);
+        // Connect from right port of source node to left port of target node
+        const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+        const dx = Math.max(40, Math.abs(x2 - x1) / 2);
+        return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+      };
+      const compareItems = mItems.filter((i) => compare.includes(i.id));
+      const toggleCompare = (i) => setCompare((c) => (c.includes(i.id) ? c.filter((x) => x !== i.id) : [...c, i.id].slice(-4)));
+      const src = graph.sources || {};
+      const degraded = ['pluginManager', 'loader'].filter((k) => src[k] === false);
 
-          // --- Right Slide-Over Inspector / Copilot / Marketplace Drawer ---
-          activeDrawer && h('div', {
-            onMouseDown: e => e.stopPropagation(),
-            style: {
-              width: 360,
-              backgroundColor: THEME.surface,
-              borderLeft: '1px solid ' + THEME.border,
-              display: 'flex',
-              flexDirection: 'column',
-              zIndex: 100,
-              userSelect: 'text'
-            }
+      return h('div', { style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: C.bg, color: C.text, fontFamily: 'inherit' } },
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', padding: '8px 12px', borderBottom: `1px solid ${C.border}`, background: C.surface } },
+          h('b', { style: { fontSize: 14 } }, 'Workflow Studio'),
+          h('input', { style: input({ width: 200 }), placeholder: 'Filter nodes…', value: filter, onChange: (e) => setFilter(e.target.value) }),
+          h('button', { style: btn(), onClick: refresh }, loading ? '…' : 'Refresh'),
+          h('button', { style: btn(), onClick: resetLayout }, 'Auto Layout'),
+          h('button', { style: btn(), onClick: fit }, 'Fit'),
+          h('button', { style: btn({ background: marketOpen ? C.surface2 : C.surface }), onClick: () => setMarketOpen((v) => !v) }, 'Marketplace'),
+          h('span', { style: { flex: 1 } }),
+          degraded.length > 0 && h('span', { style: { fontSize: 11, color: C.warn }, title: 'Some harness services could not be read; the graph may be incomplete.' }, `⚠ partial data (${degraded.join(', ')})`),
+          h('button', { style: staged.length ? primary() : btn(), onClick: () => setShowChanges((v) => !v) }, `Changes${staged.length ? ` (${staged.length})` : ''}`)),
+        err && h('div', { style: { padding: '6px 12px', color: C.danger, fontSize: 12 } }, `Could not load the harness graph: ${err}`),
+        h('div', { style: { flex: 1, display: 'flex', minHeight: 0, position: 'relative' } },
+          marketOpen && h(Market, { onPick: (i) => setSel({ ...i, __market: true }), selectedId: sel?.__market ? sel.id : null, items: mItems, status: mStatus, loading: mLoading, kind, setKind, query: q, setQuery: setQ, run: runMarket, compare, links: mLinks }),
+          h('div', {
+            ref: wrap, onPointerDown: onBgDown, onClick: () => { if (!moved.current) setSel(null); },
+            style: { flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab', userSelect: 'none', backgroundImage: `radial-gradient(${C.border} 1px, transparent 1px)`, backgroundSize: `${20 * view.k}px ${20 * view.k}px`, backgroundPosition: `${view.x}px ${view.y}px` },
           },
-            // Drawer Tabs Header
-            h('div', {
-              style: {
-                height: 44,
-                borderBottom: '1px solid ' + THEME.border,
-                display: 'flex',
-                alignItems: 'center',
-                padding: '0 8px'
-              }
-            },
-              h('button', {
-                onClick: () => setActiveDrawer('inspector'),
-                style: drawerTabStyle(activeDrawer === 'inspector')
-              }, 'Inspector'),
-              h('button', {
-                onClick: () => setActiveDrawer('market'),
-                style: drawerTabStyle(activeDrawer === 'market')
-              }, 'Marketplace'),
-              h('button', {
-                onClick: () => setActiveDrawer('copilot'),
-                style: drawerTabStyle(activeDrawer === 'copilot')
-              }, 'AI Copilot'),
-              h('button', {
-                onClick: () => setActiveDrawer(null),
-                style: { ...drawerTabStyle(false), flex: 'none', padding: '0 12px', color: THEME.textMuted }
-              }, '✕')
-            ),
-
-            // --- Drawer Content 1: Node Inspector ---
-            activeDrawer === 'inspector' && h('div', { style: { flex: 1, overflowY: 'auto', padding: 16 } },
-              selectedNode ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
-                // Header Card
-                h('div', null,
-                  h('div', { style: { fontSize: 11, fontWeight: 700, color: THEME.accent, textTransform: 'uppercase' } }, selectedNode.type),
-                  h('div', { style: { fontSize: 16, fontWeight: 700, color: THEME.textPrimary, marginTop: 2 } }, selectedNode.label),
-                  h('div', { style: { fontSize: 11, color: THEME.textSecondary, marginTop: 2 } }, selectedNode.fullPackage)
-                ),
-
-                // Immutability Notice
-                h('div', {
-                  style: {
-                    padding: '8px 12px',
-                    borderRadius: 6,
-                    backgroundColor: selectedNode.readOnly ? 'rgba(100, 116, 139, 0.12)' : 'rgba(16, 185, 129, 0.12)',
-                    border: '1px solid ' + (selectedNode.readOnly ? 'rgba(100, 116, 139, 0.25)' : 'rgba(16, 185, 129, 0.25)'),
-                    fontSize: 12,
-                    color: selectedNode.readOnly ? THEME.core : THEME.tool
-                  }
-                }, selectedNode.readOnly ? '🔒 Core System Component (Read-Only)' : '✏️ User Composition (Configurable & Movable)'),
-
-                // Description
-                selectedNode.desc && h('div', null,
-                  h('div', { style: fieldLabelStyle }, 'Description'),
-                  h('p', { style: { fontSize: 12, color: THEME.textSecondary, margin: '4px 0 0 0', lineHeight: 1.5 } }, selectedNode.desc)
-                ),
-
-                // Coordinates
-                h('div', null,
-                  h('div', { style: fieldLabelStyle }, 'Canvas Position'),
-                  h('div', { style: { fontSize: 12, color: THEME.textMuted, marginTop: 4 } },
-                    'X: ' + (selectedNode.x || 0) + 'px  •  Y: ' + (selectedNode.y || 0) + 'px (Drag node on canvas to move)'
-                  )
-                ),
-
-                // Injected Services
-                Array.isArray(selectedNode.injectedServices) && selectedNode.injectedServices.length > 0 && h('div', null,
-                  h('div', { style: fieldLabelStyle }, 'Injected Services'),
-                  h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 } },
-                    selectedNode.injectedServices.map(s => h('span', { key: s, style: chipStyle }, s))
-                  )
-                ),
-
-                // Disconnect Connections Action
-                (() => {
-                  const nodeEdges = edges.filter(e => e.from === selectedNode.id || e.to === selectedNode.id);
-                  if (nodeEdges.length === 0) return null;
-                  return h('div', { style: { marginTop: 10 } },
-                    h('button', {
-                      onClick: () => handleDisconnectAllNodeEdges(selectedNode.id),
-                      style: {
-                        width: '100%',
-                        padding: '8px',
-                        backgroundColor: 'rgba(245, 158, 11, 0.12)',
-                        border: '1px solid rgba(245, 158, 11, 0.3)',
-                        color: THEME.preset,
-                        borderRadius: 6,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: 'pointer'
-                      }
-                    }, 'Disconnect All Cables (' + nodeEdges.length + ')')
-                  );
-                })(),
-
-                // Delete Action (if not read-only)
-                !selectedNode.readOnly && h('div', { style: { marginTop: 10 } },
-                  h('button', {
-                    onClick: () => handleDeleteNode(selectedNode.id),
-                    style: {
-                      width: '100%',
-                      padding: '8px',
-                      backgroundColor: 'rgba(244, 63, 94, 0.12)',
-                      border: '1px solid rgba(244, 63, 94, 0.3)',
-                      color: '#f43f5e',
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: 'pointer'
-                    }
-                  }, 'Remove from Canvas')
-                )
-              ) : h('div', { style: { color: THEME.textSecondary, fontSize: 13, textAlign: 'center', marginTop: 40 } },
-                'Select any node or drag a cable to inspect details.'
-              )
-            ),
-
-            // --- Drawer Content 2: Marketplace ---
-            activeDrawer === 'market' && h('div', { style: { flex: 1, overflowY: 'auto', padding: 16 } },
-              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-                h('div', { style: { fontSize: 14, fontWeight: 700, color: THEME.textPrimary } }, 'Component Registry'),
-                h('div', { style: { fontSize: 12, color: THEME.textSecondary } }, 'Add plugins, curated MCP bridges, or agent skills directly to your graph.'),
-
-                // Search Input
-                h('input', {
-                  type: 'text',
-                  placeholder: 'Search marketplace & skills...',
-                  value: marketSearch,
-                  onChange: e => setMarketSearch(e.target.value),
-                  onKeyDown: e => e.stopPropagation(),
-                  style: inputStyle
-                }),
-
-                // Category Filter Pills
-                h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
-                  ['all', 'mcp', 'skill', 'community'].map(cat => h('button', {
-                    key: cat,
-                    onClick: () => setMarketCategory(cat),
-                    style: {
-                      padding: '4px 10px',
-                      borderRadius: 12,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      border: 'none',
-                      backgroundColor: marketCategory === cat ? THEME.accent : 'rgba(255,255,255,0.06)',
-                      color: marketCategory === cat ? '#fff' : THEME.textSecondary,
-                      cursor: 'pointer'
-                    }
-                  }, cat.toUpperCase()))
-                ),
-
-                // Filtered Catalog List
-                h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 } },
-                  MARKETPLACE_CATALOG
-                    .filter(item => (marketCategory === 'all' || item.type === marketCategory) &&
-                                   (item.title.toLowerCase().includes(marketSearch.toLowerCase()) ||
-                                    item.description.toLowerCase().includes(marketSearch.toLowerCase())))
-                    .map(item => {
-                      const alreadyAdded = nodes.some(n => n.id === 'market:' + item.id || n.fullPackage === item.name);
-                      return h('div', {
-                        key: item.id,
-                        style: {
-                          padding: 12,
-                          backgroundColor: 'rgba(255, 255, 255, 0.02)',
-                          border: '1px solid ' + THEME.border,
-                          borderRadius: 8,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 6
-                        }
-                      },
-                        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-                          h('span', { style: { fontWeight: 600, fontSize: 13, color: THEME.textPrimary } }, item.title),
-                          h('span', {
-                            style: {
-                              fontSize: 10,
-                              fontWeight: 700,
-                              color: item.type === 'mcp' ? THEME.mcp : item.type === 'skill' ? THEME.skill : THEME.tool
-                            }
-                          }, item.type.toUpperCase())
-                        ),
-                        h('p', { style: { fontSize: 11, color: THEME.textSecondary, margin: 0, lineHeight: 1.4 } }, item.description),
-                        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 } },
-                          h('span', { style: { fontSize: 10, color: THEME.textMuted } }, item.author),
-                          h('button', {
-                            onClick: () => handleAddMarketplaceItem(item),
-                            disabled: alreadyAdded,
-                            style: {
-                              padding: '4px 12px',
-                              borderRadius: 4,
-                              fontSize: 11,
-                              fontWeight: 600,
-                              backgroundColor: alreadyAdded ? 'rgba(255,255,255,0.06)' : THEME.accent,
-                              color: alreadyAdded ? THEME.textMuted : '#fff',
-                              border: 'none',
-                              cursor: alreadyAdded ? 'default' : 'pointer'
-                            }
-                          }, alreadyAdded ? 'Added' : '+ Add')
-                        )
-                      );
-                    })
-                )
-              )
-            ),
-
-            // --- Drawer Content 3: AI Copilot ---
-            activeDrawer === 'copilot' && h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column' } },
-              // Subtabs
-              h('div', { style: { display: 'flex', borderBottom: '1px solid ' + THEME.border, padding: '4px 8px' } },
-                h('button', {
-                  onClick: () => setCopilotTab('chat'),
-                  style: drawerTabStyle(copilotTab === 'chat')
-                }, 'Chat Advisor'),
-                h('button', {
-                  onClick: () => setCopilotTab('creator'),
-                  style: drawerTabStyle(copilotTab === 'creator')
-                }, 'Creator Scaffolder')
-              ),
-
-              copilotTab === 'chat' ? h('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 } },
-                // Quick Action Suggestion Chips
-                h('div', {
-                  style: {
-                    padding: '8px 12px',
-                    borderBottom: '1px solid ' + THEME.border,
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: 6
-                  }
-                },
-                  h('button', {
-                    onClick: () => sendChatMessage('auto-arrange graph'),
-                    style: chipBtnStyle
-                  }, '⚡ Auto-Arrange'),
-                  h('button', {
-                    onClick: () => sendChatMessage('suggest database mcps'),
-                    style: chipBtnStyle
-                  }, '🔌 Database MCPs'),
-                  h('button', {
-                    onClick: () => sendChatMessage('explain standard agent'),
-                    style: chipBtnStyle
-                  }, '🔍 Standard Agent')
-                ),
-
-                // Chat Message Stream
-                h('div', { style: { flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 } },
-                  chatMessages.map((m, idx) => h('div', {
-                    key: idx,
-                    style: {
-                      alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: '88%',
-                      backgroundColor: m.role === 'user' ? THEME.accent : 'rgba(255, 255, 255, 0.05)',
-                      color: THEME.textPrimary,
-                      padding: '8px 12px',
-                      borderRadius: 8,
-                      fontSize: 12,
-                      lineHeight: 1.45,
-                      userSelect: 'text'
-                    }
-                  },
-                    h('div', null, m.text),
-                    m.actionBtn && h('button', {
-                      onClick: m.actionBtn.onClick,
-                      style: {
-                        marginTop: 6,
-                        padding: '4px 10px',
-                        backgroundColor: THEME.accent,
-                        color: '#fff',
-                        border: 'none',
-                        borderRadius: 4,
-                        fontSize: 11,
-                        fontWeight: 600,
-                        cursor: 'pointer'
-                      }
-                    }, m.actionBtn.label)
-                  )),
-                  h('div', { ref: chatMessagesEndRef })
-                ),
-
-                // Input bar (explicit non-blocking handlers)
-                h('div', {
-                  style: {
-                    padding: 8,
-                    borderTop: '1px solid ' + THEME.border,
-                    display: 'flex',
-                    gap: 6,
-                    backgroundColor: THEME.surface
-                  }
-                },
-                  h('input', {
-                    type: 'text',
-                    value: chatInput,
-                    onChange: e => setChatInput(e.target.value),
-                    onKeyDown: e => {
-                      e.stopPropagation();
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        sendChatMessage(chatInput);
-                      }
-                    },
-                    placeholder: 'Ask about plugins, auto-arrange, MCPs...',
-                    style: {
-                      flex: 1,
-                      padding: '7px 12px',
-                      backgroundColor: 'rgba(255, 255, 255, 0.04)',
-                      border: '1px solid ' + THEME.border,
-                      borderRadius: 6,
-                      color: THEME.textPrimary,
-                      fontSize: 12,
-                      outline: 'none',
-                      userSelect: 'text'
-                    }
-                  }),
-                  h('button', {
-                    type: 'button',
-                    onClick: () => sendChatMessage(chatInput),
-                    style: {
-                      padding: '7px 14px',
-                      backgroundColor: THEME.accent,
-                      border: 'none',
-                      borderRadius: 6,
-                      color: '#fff',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      flex: 'none'
-                    }
-                  }, 'Send')
-                )
-              ) : h('div', { style: { flex: 1, overflowY: 'auto', padding: 16 } },
-                // Creator Mode Scaffolding Form
-                h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-                  h('div', { style: { fontSize: 13, fontWeight: 700, color: THEME.accent } }, 'Scaffold New Cordis Bundle'),
-                  h('div', { style: { fontSize: 11, color: THEME.textSecondary } }, 'Generate a compliant DSH plugin with schema, renderers, and patch entry directly onto the canvas.'),
-
-                  h('label', { style: fieldLabelStyle }, 'Package Identifier'),
-                  h('input', {
-                    type: 'text',
-                    value: creatorForm.name,
-                    onChange: e => setCreatorForm({ ...creatorForm, name: e.target.value }),
-                    onKeyDown: e => e.stopPropagation(),
-                    style: inputStyle
-                  }),
-
-                  h('label', { style: fieldLabelStyle }, 'Display Title'),
-                  h('input', {
-                    type: 'text',
-                    value: creatorForm.title,
-                    onChange: e => setCreatorForm({ ...creatorForm, title: e.target.value }),
-                    onKeyDown: e => e.stopPropagation(),
-                    style: inputStyle
-                  }),
-
-                  h('label', { style: fieldLabelStyle }, 'Bundle Archetype'),
-                  h('select', {
-                    value: creatorForm.type,
-                    onChange: e => setCreatorForm({ ...creatorForm, type: e.target.value }),
-                    style: { ...inputStyle, backgroundColor: THEME.surface }
-                  },
-                    h('option', { value: 'host-tool' }, 'Host Tool Plugin'),
-                    h('option', { value: 'mcp' }, 'MCP Server Bundle'),
-                    h('option', { value: 'decoration' }, 'UI Client Plugin')
-                  ),
-
-                  h('label', { style: fieldLabelStyle }, 'Description'),
-                  h('textarea', {
-                    value: creatorForm.description,
-                    onChange: e => setCreatorForm({ ...creatorForm, description: e.target.value }),
-                    onKeyDown: e => e.stopPropagation(),
-                    rows: 3,
-                    style: { ...inputStyle, resize: 'none' }
-                  }),
-
-                  h('button', {
-                    onClick: handleScaffoldSubmit,
-                    style: {
-                      marginTop: 8,
-                      padding: '8px 16px',
-                      backgroundColor: THEME.preset,
-                      color: '#000',
-                      border: 'none',
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: 'pointer'
-                    }
-                  }, '✨ Scaffold on Canvas')
-                )
-              )
-            ),
-
-            // --- Drawer Content 4: Diff Review ---
-            activeDrawer === 'diff' && h('div', { style: { flex: 1, overflowY: 'auto', padding: 16 } },
-              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-                h('div', { style: { fontSize: 14, fontWeight: 700, color: THEME.textPrimary } }, 'Pending Composition Changes'),
-                h('div', { style: { fontSize: 12, color: THEME.textSecondary } }, 'Review graph changes before committing to cordis.patch.yml.'),
-
-                stagedChanges.length === 0 ? h('div', { style: { color: THEME.textMuted, fontSize: 12, marginTop: 20, textAlign: 'center' } },
-                  'No changes staged. Add marketplace components or drag cables to stage composition diffs.'
-                ) : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-                  stagedChanges.map((ch, idx) => h('div', {
-                    key: idx,
-                    style: {
-                      padding: '8px 12px',
-                      backgroundColor: 'rgba(255, 255, 255, 0.03)',
-                      border: '1px solid ' + THEME.border,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontFamily: 'monospace',
-                      userSelect: 'text'
-                    }
-                  },
-                    ch.action === 'insert' && h('span', { style: { color: THEME.tool } }, '+ add plugin: ' + ch.package),
-                    ch.action === 'remove' && h('span', { style: { color: '#f43f5e' } }, '- remove node: ' + ch.id),
-                    ch.action === 'connect' && h('span', { style: { color: THEME.accent } }, '⚡ wire: ' + ch.label),
-                    ch.action === 'disconnect' && h('span', { style: { color: THEME.preset } }, '✂ disconnect edge: ' + ch.edgeId),
-                    ch.action === 'disconnect-all' && h('span', { style: { color: THEME.preset } }, '✂ disconnected ' + ch.count + ' cables from ' + ch.nodeId),
-                    ch.action === 'scaffold' && h('span', { style: { color: THEME.draft } }, '✨ scaffold: ' + ch.package)
-                  )),
-
-                  h('button', {
-                    onClick: () => {
-                      alert('Staged composition verified! Ready to write to cordis.patch.yml.');
-                      setStagedChanges([]);
-                    },
-                    style: {
-                      marginTop: 12,
-                      padding: '8px 16px',
-                      backgroundColor: THEME.accent,
-                      border: 'none',
-                      borderRadius: 6,
-                      color: '#fff',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: 'pointer'
-                    }
-                  }, 'Apply Composition to Harness Profile')
-                )
-              )
-            )
-          )
-        )
-      );
+            h('div', { style: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', transform: `translate(${view.x}px,${view.y}px) scale(${view.k})` } },
+              h('svg', { width: 1, height: 1, style: { position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' } },
+                graph.edges.map((e) => h('path', { key: e.id, d: edgePath(e), fill: 'none', stroke: C.muted, strokeWidth: 1.5, opacity: shown && !(shown.has(e.from) && shown.has(e.to)) ? 0.1 : 0.7 }))),
+              allNodes.map((n) => h('div', { key: n.id, style: { opacity: shown && !shown.has(n.id) ? 0.2 : 1 } }, h(NodeCard, { n, pos: P(n.id), selected: selectedNode?.id === n.id, onDown: onNodeDown, onClick: selectNode })))),
+            h('div', { onPointerDown: (e) => e.stopPropagation(), onClick: (e) => e.stopPropagation(), style: { position: 'absolute', left: 12, bottom: 12, display: 'flex', gap: 4, zIndex: 5 } },
+              h('button', { style: btn({ padding: '3px 9px' }), title: 'Zoom out', onClick: () => zoomBy(1 / 1.25) }, '−'),
+              h('button', { style: btn({ padding: '3px 9px' }), title: 'Zoom in', onClick: () => zoomBy(1.25) }, '+'),
+              h('button', { style: btn({ padding: '3px 9px' }), title: 'Fit to screen', onClick: fit }, '⤢')),
+            !loading && allNodes.length === 0 && h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: C.muted, fontSize: 13 } }, 'No nodes found. Check that the harness services are available.')),
+          selectedNode && h(Inspector, { sel: selectedNode, staged, onStage: stage, onClose: () => setSel(null), onAsk: (p) => { setAiOpen(true); setSeed(p); }, inCompare: compare.includes(selectedNode.id), onCompare: toggleCompare }),
+          h(AiPanel, { open: aiOpen, setOpen: setAiOpen, selected: selectedNode, market: compareItems.length ? compareItems : mItems.slice(0, 15), onStageAction: stageAction, seed, clearSeed: () => setSeed(''), compareItems }),
+          showChanges && h(Changes, { staged, onUnstage: (key) => stage({ op: 'unstage', key }), onApply: apply, applying, results, onClose: () => setShowChanges(false) })));
     }
 
-    // Shared Styles
-    const topBtnStyle = (active) => ({
-      padding: '4px 10px',
-      fontSize: 12,
-      fontWeight: 500,
-      backgroundColor: active ? 'rgba(79, 120, 232, 0.15)' : 'rgba(255, 255, 255, 0.04)',
-      border: '1px solid ' + (active ? THEME.accent : THEME.border),
-      color: active ? THEME.accent : THEME.textPrimary,
-      borderRadius: 6,
-      cursor: 'pointer',
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4
-    });
-
-    const zoomBtnStyle = {
-      padding: '2px 8px',
-      fontSize: 11,
-      fontWeight: 600,
-      backgroundColor: 'rgba(255, 255, 255, 0.06)',
-      border: '1px solid ' + THEME.border,
-      color: THEME.textPrimary,
-      borderRadius: 4,
-      cursor: 'pointer'
-    };
-
-    const drawerTabStyle = (active) => ({
-      flex: 1,
-      height: 32,
-      border: 'none',
-      borderBottom: '2px solid ' + (active ? THEME.accent : 'transparent'),
-      backgroundColor: 'transparent',
-      color: active ? THEME.textPrimary : THEME.textSecondary,
-      fontSize: 12,
-      fontWeight: active ? 600 : 500,
-      cursor: 'pointer'
-    });
-
-    const fieldLabelStyle = {
-      fontSize: 11,
-      fontWeight: 600,
-      color: THEME.textSecondary,
-      textTransform: 'uppercase',
-      letterSpacing: 0.5,
-      marginTop: 6
-    };
-
-    const chipStyle = {
-      padding: '2px 8px',
-      backgroundColor: 'rgba(255, 255, 255, 0.05)',
-      borderRadius: 4,
-      fontSize: 11,
-      color: THEME.textPrimary,
-      border: '1px solid ' + THEME.border
-    };
-
-    const chipBtnStyle = {
-      padding: '3px 8px',
-      backgroundColor: 'rgba(255, 255, 255, 0.05)',
-      border: '1px solid ' + THEME.border,
-      borderRadius: 12,
-      color: THEME.textSecondary,
-      fontSize: 11,
-      cursor: 'pointer'
-    };
-
-    const inputStyle = {
-      width: '100%',
-      padding: '6px 10px',
-      backgroundColor: 'rgba(255, 255, 255, 0.04)',
-      border: '1px solid ' + THEME.border,
-      borderRadius: 6,
-      color: THEME.textPrimary,
-      fontSize: 12,
-      outline: 'none',
-      boxSizing: 'border-box',
-      userSelect: 'text'
-    };
-
-    // Curated Marketplace Registry
-    const MARKETPLACE_CATALOG = [
-      { id: 'mcp-postgres', name: '@modelcontextprotocol/server-postgres', title: 'PostgreSQL MCP', type: 'mcp', description: 'Read and write schemas and query database tables directly.', author: 'Anthropic' },
-      { id: 'mcp-github', name: '@modelcontextprotocol/server-github', title: 'GitHub MCP', type: 'mcp', description: 'Interact with GitHub repositories, issues, PRs and branches.', author: 'GitHub' },
-      { id: 'mcp-sqlite', name: '@modelcontextprotocol/server-sqlite', title: 'SQLite MCP', type: 'mcp', description: 'Query and explore local SQLite databases safely.', author: 'Anthropic' },
-      { id: 'mcp-brave', name: '@modelcontextprotocol/server-brave-search', title: 'Brave Search MCP', type: 'mcp', description: 'Web search and local search engine integration.', author: 'Brave' },
-      { id: 'skill-audit', name: 'skill://security-audit', title: 'Security Audit Skill', type: 'skill', description: 'Audits Cordis configs and detects credential leaks.', author: 'DSH Community' },
-      { id: 'skill-mermaid', name: 'skill://mermaid-flowcharts', title: 'Mermaid Visualizer', type: 'skill', description: 'Renders dynamic interactive Mermaid diagrams in chat.', author: 'Core' },
-      { id: 'comm-slack', name: '@community/dsh-slack-bridge', title: 'Slack Notification Bridge', type: 'community', description: 'Forwards session events and approvals to Slack channels.', author: 'Community' },
-      { id: 'comm-docker', name: '@community/dsh-docker-runner', title: 'Docker Sandbox Runner', type: 'community', description: 'Executes untrusted bash tools in isolated containers.', author: 'DevOps Team' }
-    ];
-
-    /**
-     * Sidebar Nav Icon Component (used by sidebar.panellist)
-     * Matches DeepSeek Harness native icon size (16px or 18px)
-     */
-    function WorkflowStudioPanelIcon({ size = 18 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 2,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round'
-      },
-        h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1.5 }),
-        h('rect', { x: 15, y: 3, width: 6, height: 6, rx: 1.5 }),
-        h('rect', { x: 9, y: 15, width: 6, height: 6, rx: 1.5 }),
-        h('path', { d: 'M6 9v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9' }),
-        h('path', { d: 'M12 13v2' })
-      );
-    }
-
-    /**
-     * Main Page View for Workflow Studio (rendered when selected in the sidebar)
-     */
-    function WorkflowStudioMainPage() {
-      return h(WorkflowStudioApp, { embedded: true });
+    function PanelIcon({ size = 18 }) {
+      return h('svg', { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+        h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1.5 }), h('rect', { x: 15, y: 3, width: 6, height: 6, rx: 1.5 }), h('rect', { x: 9, y: 15, width: 6, height: 6, rx: 1.5 }),
+        h('path', { d: 'M6 9v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V9' }), h('path', { d: 'M12 13v2' }));
     }
 
     return {
       inject: ['slots'],
       apply(ctx) {
-        // 1. Primary Left Sidebar Panel Entry (sidebar.panellist)
-        // Order 20 places it directly below Automation tasks (order 10) and Plugins (order 0)
-        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-          name: 'sidebar.panellist',
-          id: 'workflow-studio',
-          order: 20,
-          label: () => 'Workflow Studio'
-        }, WorkflowStudioPanelIcon));
-
-        // 2. Main Viewport Panel for Workflow Studio
-        ctx.slots.inject('main', () => ctx.slots.register({
-          name: 'main',
-          key: 'workflow-studio'
-        }, WorkflowStudioMainPage));
-      }
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: 'workflow-studio', order: 20, label: () => 'Workflow Studio' }, PanelIcon));
+        ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'workflow-studio' }, StudioApp));
+      },
     };
-  }
+  },
 });

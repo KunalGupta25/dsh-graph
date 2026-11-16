@@ -1,309 +1,272 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { callAny, dshHome, maskSecrets } from './util.js';
 
-/**
- * Inspects the live Cordis registry, active presets, skills, and desktop profile to build the unified visual DAG.
- */
+const CORE_SERVICES = [
+  ['tools', 'Tool registry', 'Registers model-facing tools and runs every tool call through the execution pipeline.'],
+  ['sessions', 'Session store', 'Append-only, event-sourced conversation log that everything the model sees derives from.'],
+  ['agents', 'Agent runtime', 'Live agents, turns and steps.'],
+  ['llm', 'LLM adapters', 'Provider-neutral model streaming; adapters register here.'],
+  ['skills', 'Skill registry', 'Merges skill catalogs from providers and serves skill bodies to the model.'],
+  ['subagents', 'Subagents', 'Delegation to child agents through registered backends.'],
+  ['pluginManager', 'Plugin manager', 'Installs, enables, disables and removes bundles for the current profile.'],
+  ['pluginMarket', 'Plugin market', 'Reads the configured plugin market indexes.'],
+  ['settings', 'Settings', 'Configuration forms for plugin config fields.'],
+  ['credentials', 'Credentials', 'Secret storage; config carries references, providers hold values.'],
+  ['storage', 'Storage hub', 'Named storage backends and data forms.'],
+  ['fs', 'Filesystem seam', 'Filesystem provider used by file tools.'],
+  ['shell', 'Shell seam', 'Bash/PowerShell executor used by shell tools.'],
+  ['webServer', 'Web server', 'HTTP routes for the browser client.'],
+  ['workflowEngine', 'Workflow engine', 'Scripted multi-agent orchestration.'],
+];
+
+// Plugins that keep the harness itself running. Their config can be read but the studio will not
+// let you disable or remove them.
+const LOCKED = /^@deepseek-ai\/dsh-(agent|agent-loop|session|session-persistence-jsonl|tools|plugin-manager|config-editor|hmr|storage|storage-domain|storage-json|typert-.+|system-prompt|llm|api-.+|host-.+|client-(connection|modules|hmr|resources|locale)|client-ui-(renderer|layout|theme|session|sidebar|settings|plugin-manager))$/;
+
+export function classify(name = '') {
+  if (/dsh-mcp-(client|manager)$/.test(name)) return 'mcp';
+  if (/dsh-agent-preset$/.test(name)) return 'preset';
+  if (/dsh-(tool|command)-/.test(name)) return 'tool';
+  return 'plugin';
+}
+
+const arr = (v) => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v) : []);
+const pickTitle = (meta, fallback) => {
+  const m = meta?.en?.meta || meta?.en || meta?.meta || meta;
+  return (m && typeof m.title === 'string' && m.title) || fallback;
+};
+const pickDescription = (meta, fallback = '') => {
+  const m = meta?.en?.meta || meta?.en || meta?.meta || meta;
+  return (m && typeof m.description === 'string' && m.description) || fallback;
+};
+
 export class CordisGraphScanner {
-  constructor(ctx) {
+  constructor(ctx, options = {}) {
     this.ctx = ctx;
+    this.options = options;
   }
 
-  /**
-   * Scans the runtime and returns all nodes and edges.
-   */
+  svc(key) {
+    try {
+      return this.ctx.get?.(key) ?? this.ctx[key];
+    } catch {
+      return undefined;
+    }
+  }
+
   async scan() {
     const nodes = [];
     const edges = [];
-    const processedIds = new Set();
+    const seen = new Set();
+    const sources = {};
+    const add = (node) => {
+      if (seen.has(node.id)) return false;
+      seen.add(node.id);
+      nodes.push(node);
+      return true;
+    };
+    const link = (from, to, kind = 'composition') => {
+      if (!seen.has(from) || !seen.has(to)) return;
+      const id = `${from}->${to}`;
+      if (!edges.some((e) => e.id === id)) edges.push({ id, from, to, kind });
+    };
 
-    // 1. Core baseline system services
-    const coreServices = [
-      { id: 'core:tools', label: 'Tools Engine', fullPackage: '@deepseek-ai/dsh-tools', type: 'core', readOnly: true, desc: 'Central tool registry and execution pipeline' },
-      { id: 'core:sessions', label: 'Session Store', fullPackage: '@deepseek-ai/dsh-session', type: 'core', readOnly: true, desc: 'Event-sourced conversation session storage' },
-      { id: 'core:agents', label: 'Agent Runtime', fullPackage: '@deepseek-ai/dsh-agent', type: 'core', readOnly: true, desc: 'Agent loops, initiator scopes, and event dispatch' },
-      { id: 'core:pluginManager', label: 'Plugin Manager', fullPackage: '@deepseek-ai/dsh-plugin-manager', type: 'core', readOnly: true, desc: 'Profile-wide bundle lifecycle and patch composer' },
-      { id: 'core:storage', label: 'Storage Hub', fullPackage: '@deepseek-ai/dsh-storage', type: 'core', readOnly: true, desc: 'Unified disk and state storage provider' }
-    ];
-
-    for (const core of coreServices) {
-      nodes.push({
-        id: core.id,
-        label: core.label,
-        fullPackage: core.fullPackage,
-        type: 'core',
-        readOnly: true,
-        status: 'active',
-        description: core.desc,
-        injectedServices: [],
-        providedServices: [core.id.replace('core:', '')]
+    // 1. Core services that are live in this process.
+    for (const [key, label, description] of CORE_SERVICES) {
+      if (this.svc(key) === undefined) continue;
+      add({
+        id: `core:${key}`, label, type: 'core', package: `ctx.${key}`, editable: false,
+        lockReason: 'Core service provided by the runtime', origin: 'core', state: 'active', description,
       });
-      processedIds.add(core.id);
+    }
+    sources.core = nodes.length > 0;
+
+    // 2. Bundles (what is installed in the profile) and their declared rows.
+    const bundles = await this.listBundles(sources);
+    const rowMeta = new Map(); // row id -> { bundle, official }
+    for (const b of bundles) {
+      const official = Boolean(b.official) || (!b.source && /^@deepseek-ai\//.test(b.name || ''));
+      const bundleId = `bundle:${b.name}`;
+      if (!official) {
+        add({
+          id: bundleId, label: pickTitle(b.meta, b.name), type: 'bundle', package: b.name, version: b.version,
+          editable: true, origin: 'profile', state: b.error ? 'error' : b.enabled === false ? 'disabled' : 'active',
+          description: pickDescription(b.meta, b.description || ''), source: b.source, error: b.error?.message || (typeof b.error === 'string' ? b.error : undefined),
+          bundle: b.name, enabled: b.enabled !== false,
+        });
+      }
+      for (const row of arr(b.rows ?? b.plugins ?? b.entries)) {
+        const id = row?.id ?? row?.entry ?? row?.name;
+        if (id) rowMeta.set(String(id), { bundle: b.name, official, bundleNodeId: official ? null : bundleId, row });
+      }
     }
 
-    // 2. Discover Agent Presets
-    const presets = await this.discoverPresets();
-    for (const preset of presets) {
-      const presetNodeId = `preset:${preset.id}`;
-      nodes.push({
-        id: presetNodeId,
-        label: preset.name || preset.id,
-        fullPackage: '@deepseek-ai/dsh-agent-preset',
-        description: preset.description || '',
-        type: 'preset',
-        readOnly: preset.isShipped || false,
-        status: 'active',
-        plugins: preset.plugins || []
-      });
-      processedIds.add(presetNodeId);
+    // 3. Live Loader entries (every plugin row that exists in this process).
+    const entries = this.loaderEntries(sources);
+    const rows = entries.length ? entries : [...rowMeta.entries()].map(([id, m]) => ({ id, options: { id, name: m.row?.name, config: m.row?.config, disabled: m.row?.disabled }, live: false }));
+    for (const entry of rows) {
+      const o = entry.options || {};
+      const id = String(o.id ?? entry.id);
+      const pkg = o.name || '';
+      const meta = rowMeta.get(id);
+      const type = classify(pkg);
+      const locked = LOCKED.test(pkg) || pkg === '@local/dsh-workflow-studio';
+      const label = (meta && pickTitle(meta.row?.meta, '')) || id.replace(/^(preset|mcp|tool)-/, '');
+      const node = {
+        id: `row:${id}`, rowId: id, label, type, package: pkg, version: undefined,
+        editable: !locked, lockReason: locked ? 'Infrastructure plugin: configuration can be viewed, but it cannot be disabled or removed here' : undefined,
+        origin: meta && !meta.official ? 'profile' : 'shipped', bundle: meta?.bundle,
+        state: o.disabled === true ? 'disabled' : entry.live === false ? 'declared' : entry.state || 'active',
+        description: pickDescription(meta?.row?.meta, '') || this.describePackage(pkg),
+        config: maskSecrets(o.config ?? {}),
+        hasConfig: o.config !== undefined && o.config !== null && Object.keys(o.config || {}).length > 0,
+      };
+      if (!add(node)) continue;
+      if (meta?.bundleNodeId) link(meta.bundleNodeId, node.id, 'bundle');
+      if (type === 'tool' || type === 'mcp') link('core:tools', node.id, 'tools');
+      if (type === 'preset') link('core:agents', node.id, 'core-flow');
 
-      // Connect Core Agent runtime to Presets
-      edges.push({
-        id: `edge:core:agents->${presetNodeId}`,
-        from: 'core:agents',
-        to: presetNodeId,
-        type: 'core-flow'
-      });
-
-      // Link preset plugins as tool nodes
-      if (Array.isArray(preset.plugins)) {
-        for (const child of preset.plugins) {
-          const childId = `plugin:${child.id || child.name.replace(/^@.*\//, '')}`;
-          if (!processedIds.has(childId)) {
-            nodes.push({
-              id: childId,
-              label: child.id || child.name.replace(/^@deepseek-ai\/dsh-/, ''),
-              fullPackage: child.name,
-              type: 'tool',
-              readOnly: true,
-              status: 'active',
-              description: `Mounted under ${preset.name}`
-            });
-            processedIds.add(childId);
-          }
-
-          edges.push({
-            id: `edge:${presetNodeId}->${childId}`,
-            from: presetNodeId,
-            to: childId,
-            type: 'composition'
+      // Preset compositions: children listed in config.plugins.
+      if (type === 'preset' && Array.isArray(o.config?.plugins)) {
+        node.presetId = o.config.id;
+        node.presetPlugins = o.config.plugins.map((p) => ({ id: p.id, name: p.name }));
+        for (const child of o.config.plugins) {
+          const childId = `row:${id}/${child.id ?? child.name}`;
+          add({
+            id: childId, rowId: `${id}/${child.id ?? child.name}`, label: String(child.id ?? child.name).replace(/^tool-/, ''),
+            type: classify(child.name), package: child.name, editable: node.editable, origin: node.origin,
+            state: child.disabled === true ? 'disabled' : 'active', parent: node.id,
+            description: this.describePackage(child.name), config: maskSecrets(child.config ?? {}), hasConfig: Boolean(child.config && Object.keys(child.config).length),
+            lockReason: node.editable ? undefined : node.lockReason,
           });
+          link(node.id, childId, 'composition');
         }
       }
     }
 
-    // 3. Discover Skills in .agents/skills
-    const skills = await this.discoverLocalSkills();
-    for (const skill of skills) {
-      const skillNodeId = `skill:${skill.name}`;
-      if (!processedIds.has(skillNodeId)) {
-        nodes.push({
-          id: skillNodeId,
-          label: skill.name,
-          fullPackage: `skill://${skill.name}`,
-          description: skill.description,
-          type: 'skill',
-          readOnly: false,
-          status: 'ready',
-          path: skill.path
-        });
-        processedIds.add(skillNodeId);
-
-        edges.push({
-          id: `edge:preset:standard->${skillNodeId}`,
-          from: 'preset:standard',
-          to: skillNodeId,
-          type: 'instruction'
-        });
-      }
+    // 4. MCP tools exposed through ctx.tools (mcp__<server>__<tool>).
+    const toolNames = await this.toolNames(sources);
+    const byServer = new Map();
+    for (const t of toolNames) {
+      const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(t);
+      if (m) byServer.set(m[1], [...(byServer.get(m[1]) || []), m[2]]);
+    }
+    for (const n of nodes.filter((x) => x.type === 'mcp')) {
+      const server = n.config?.serverName;
+      if (server && byServer.has(server)) n.tools = byServer.get(server);
     }
 
-    // 4. Discover MCP Clients
-    const mcps = await this.discoverMcpClients();
-    for (const mcp of mcps) {
-      const mcpNodeId = `mcp:${mcp.serverName}`;
-      if (!processedIds.has(mcpNodeId)) {
-        nodes.push({
-          id: mcpNodeId,
-          label: `MCP: ${mcp.serverName}`,
-          fullPackage: '@deepseek-ai/dsh-mcp-client',
-          type: 'mcp',
-          readOnly: false,
-          status: mcp.status || 'connected',
-          transport: mcp.transport,
-          tools: mcp.tools || []
-        });
-        processedIds.add(mcpNodeId);
-
-        edges.push({
-          id: `edge:preset:standard->${mcpNodeId}`,
-          from: 'preset:standard',
-          to: mcpNodeId,
-          type: 'tools'
-        });
-      }
+    // 5. Skills.
+    const skills = await this.listSkills(sources);
+    for (const s of skills) {
+      const id = `skill:${s.name}`;
+      add({
+        id, label: s.name, type: 'skill', package: s.path ? path.basename(path.dirname(s.path)) : s.name, editable: s.editable !== false,
+        origin: s.origin || 'profile', state: 'active', description: s.description || 'Agent skill', path: s.path,
+        lockReason: s.editable === false ? 'Provided by a bundled skill provider' : undefined,
+      });
+      link('core:skills', id, 'instruction');
     }
 
-    // 5. Discover installed user bundles from desktop profile
-    const profileBundles = this.discoverInstalledProfileBundles();
-    for (const bundle of profileBundles) {
-      const bundleNodeId = `bundle:${bundle.name.replace(/^@.*\//, '')}`;
-      if (!processedIds.has(bundleNodeId)) {
-        nodes.push({
-          id: bundleNodeId,
-          label: bundle.name.replace(/^@.*\//, ''),
-          fullPackage: bundle.name,
-          version: bundle.version,
-          type: 'tool',
-          readOnly: false,
-          status: 'active',
-          description: `User bundle installed in desktop profile`
-        });
-        processedIds.add(bundleNodeId);
+    return { nodes, edges, sources, timestamp: Date.now(), profile: process.env.DSH_PROFILE || null };
+  }
 
-        edges.push({
-          id: `edge:core:pluginManager->${bundleNodeId}`,
-          from: 'core:pluginManager',
-          to: bundleNodeId,
-          type: 'plugin'
-        });
-      }
-    }
+  describePackage(name) {
+    return name ? `Plugin package ${name}.` : '';
+  }
 
-    // 6. Apply Topological Collision-Free DAG Layout Coordinates
-    this.applyTopologicalLayout(nodes);
-
-    return { nodes, edges, timestamp: Date.now() };
+  async listBundles(sources) {
+    const pm = this.svc('pluginManager');
+    const res = await callAny(pm, ['listBundles'], [[], [{}]]);
+    sources.pluginManager = res.ok;
+    if (!res.ok) { sources.pluginManagerError = res.error; return []; }
+    const v = res.value;
+    return arr(v?.bundles ?? v);
   }
 
   /**
-   * Computes clean 4-tier hierarchical coordinates so nodes NEVER collide or overlap.
+   * Reads entries from the Cordis loader.
+   * Verified: In Cordis runtime, loader.entries() is a generator method (*entries()) yielding Entry objects.
    */
-  applyTopologicalLayout(nodes) {
-    const tier0 = []; // Core services
-    const tier1 = []; // Presets
-    const tier2 = []; // Skills & MCPs
-    const tier3 = []; // Tools & User Plugins
-
-    for (const node of nodes) {
-      if (node.type === 'core') tier0.push(node);
-      else if (node.type === 'preset') tier1.push(node);
-      else if (node.type === 'skill' || node.type === 'mcp') tier2.push(node);
-      else tier3.push(node);
+  loaderEntries(sources) {
+    let loader;
+    try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
+    if (!loader) { sources.loader = false; return []; }
+    let rawEntries = [];
+    if (typeof loader.entries === 'function') {
+      try { rawEntries = [...loader.entries()]; } catch { /* fallback */ }
+    } else if (loader.entries && typeof loader.entries === 'object') {
+      rawEntries = Object.values(loader.entries);
     }
-
-    const NODE_WIDTH = 210;
-    const NODE_HEIGHT = 82;
-    const VERTICAL_GAP = 30; // 30px gap ensures zero overlap
-    const Y_PITCH = NODE_HEIGHT + VERTICAL_GAP; // 112px
-
-    const X_TIER_0 = 80;
-    const X_TIER_1 = 380;
-    const X_TIER_2 = 680;
-    const X_TIER_3 = 980;
-
-    tier0.forEach((n, i) => { n.x = X_TIER_0; n.y = 80 + i * Y_PITCH; });
-    tier1.forEach((n, i) => { n.x = X_TIER_1; n.y = 80 + i * (Y_PITCH + 10); });
-    tier2.forEach((n, i) => { n.x = X_TIER_2; n.y = 80 + i * Y_PITCH; });
-    tier3.forEach((n, i) => { n.x = X_TIER_3; n.y = 80 + i * Y_PITCH; });
+    sources.loader = rawEntries.length > 0;
+    return rawEntries.map((entry) => ({
+      id: entry?.options?.id ?? entry?.id,
+      options: entry?.options ?? entry?.config ?? {},
+      state: entry?.fiber ? 'active' : 'inactive',
+      live: true,
+      entry,
+    }));
   }
 
-  async discoverPresets() {
-    return [
-      {
-        id: 'standard',
-        name: 'Standard Agent',
-        description: 'Default agent equipped with terminal shell, file editing, and reasoning capabilities.',
-        isShipped: true,
-        plugins: [
-          { id: 'persona', name: '@deepseek-ai/dsh-persona' },
-          { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
-          { id: 'tool-editor', name: '@deepseek-ai/dsh-tool-str-replace-editor' }
-        ]
-      },
-      {
-        id: 'ptc',
-        name: 'PTC Agent',
-        description: 'Programmatic tool calling agent running in strict sandboxed executors.',
-        isShipped: true,
-        plugins: [
-          { id: 'persona', name: '@deepseek-ai/dsh-persona' },
-          { id: 'tool-ptc', name: '@deepseek-ai/dsh-tool-executor-ptc' }
-        ]
-      },
-      {
-        id: 'minimal',
-        name: 'Minimal Agent',
-        description: 'Lightweight conversational agent with zero extra tools.',
-        isShipped: true,
-        plugins: [
-          { id: 'persona', name: '@deepseek-ai/dsh-persona' }
-        ]
-      }
+  async toolNames(sources) {
+    const tools = this.svc('tools');
+    const res = await callAny(tools, ['list', 'names', 'listTools', 'getAll'], [[]]);
+    sources.tools = res.ok;
+    if (!res.ok) return [];
+    return arr(res.value).map((t) => (typeof t === 'string' ? t : t?.name)).filter(Boolean);
+  }
+
+  async listSkills(sources) {
+    const skillsSvc = this.svc('skills');
+    const res = await callAny(skillsSvc, ['list', 'listSkills', 'catalog', 'getCatalog'], [[], [{}]]);
+    if (res.ok) {
+      const list = arr(res.value?.skills ?? res.value).filter((s) => s && s.name);
+      if (list.length) { sources.skills = 'service'; return list.map((s) => ({ name: s.name, description: s.description, path: s.path || s.location })); }
+    }
+    const roots = [
+      path.join(dshHome(), 'skills'), path.join(os.homedir(), '.agents', 'skills'),
+      ...(this.options.skillRoots || []),
     ];
-  }
-
-  async discoverLocalSkills() {
-    const skills = [];
-    const skillsDir = path.resolve(process.cwd(), '.agents/skills');
-    if (!fs.existsSync(skillsDir)) return skills;
-
-    const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const skillMd = path.join(skillsDir, entry.name, 'SKILL.md');
-        if (fs.existsSync(skillMd)) {
-          const content = fs.readFileSync(skillMd, 'utf-8');
-          const descMatch = content.match(/description:\s*>?-?\s*(.*?)(?=\n---|\n[a-z_]+:)/s);
-          skills.push({
-            name: entry.name,
-            description: descMatch ? descMatch[1].trim().replace(/\s+/g, ' ') : 'Agent directives and guidelines',
-            path: skillMd
-          });
-        }
-      }
-    }
-    return skills;
-  }
-
-  async discoverMcpClients() {
-    if (this.ctx?.mcpManager?.listClients) {
-      try {
-        return await this.ctx.mcpManager.listClients();
-      } catch {}
-    }
-    return [
-      {
-        serverName: 'Local Server Bridge',
-        transport: 'stdio',
-        status: 'connected',
-        tools: ['mcp_query', 'mcp_mutate']
-      }
-    ];
-  }
-
-  discoverInstalledProfileBundles() {
-    const bundles = [];
-    const possiblePaths = [
-      process.env.DSH_PROFILE_DIR ? path.join(process.env.DSH_PROFILE_DIR, 'package.json') : null,
-      path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh', 'profiles', 'desktop', 'package.json')
-    ].filter(Boolean);
-
-    for (const p of possiblePaths) {
-      if (fs.existsSync(p)) {
+    const out = [];
+    for (const root of roots) {
+      let dirs = [];
+      try { dirs = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+      for (const d of dirs) {
+        if (!d.isDirectory()) continue;
+        const file = path.join(root, d.name, 'SKILL.md');
         try {
-          const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
-          if (pkg.dependencies) {
-            for (const [depName, version] of Object.entries(pkg.dependencies)) {
-              if (depName !== '@local/dsh-workflow-studio') {
-                bundles.push({ name: depName, version });
-              }
-            }
-          }
-          break;
-        } catch {}
+          const text = fs.readFileSync(file, 'utf8');
+          out.push({ name: d.name, path: file, description: parseSkillDescription(text), origin: 'profile' });
+        } catch { /* not a skill dir */ }
       }
     }
-    return bundles;
+    sources.skills = out.length ? 'filesystem' : false;
+    return out;
   }
+
+  /**
+   * Locate the live Loader entry for a row id.
+   * Verified: Iterates loader.entries() generator or fallback map.
+   */
+  findEntry(rowId) {
+    let loader;
+    try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
+    if (!loader) return undefined;
+    let list = [];
+    if (typeof loader.entries === 'function') {
+      try { list = [...loader.entries()]; } catch { /* fallback */ }
+    } else if (loader.entries && typeof loader.entries === 'object') {
+      list = Object.values(loader.entries);
+    }
+    return list.find((e) => e?.options?.id === rowId || e?.id === rowId);
+  }
+}
+
+export function parseSkillDescription(text) {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  const body = fm ? fm[1] : text.slice(0, 1500);
+  const m = /description:\s*(?:[>|][-+]?\s*\r?\n)?([\s\S]*?)(?=\r?\n[A-Za-z_-]+:|$)/.exec(body);
+  return m ? m[1].replace(/\s+/g, ' ').trim().replace(/^["']|["']$/g, '').slice(0, 400) : '';
 }

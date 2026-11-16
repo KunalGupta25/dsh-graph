@@ -7,23 +7,39 @@
   "ui": {
     "tabTitle": "Workflow Studio",
     "stageChanges": "Stage changes",
-    "applyPatch": "Apply patch",
+    "apply": "Apply to harness",
     "discard": "Discard",
+    "autoLayout": "Auto Layout",
+    "fit": "Fit",
+    "refresh": "Refresh",
+    "marketplace": "Marketplace",
+    "changes": "Changes",
+    "assistant": "Assistant",
     "nodes": {
       "core": "Core service",
       "preset": "Agent preset",
-      "hostPlugin": "Host plugin",
-      "uiPlugin": "UI plugin",
+      "plugin": "Plugin",
+      "tool": "Tool",
       "mcp": "MCP server",
       "skill": "Skill",
+      "bundle": "Bundle",
+      "draft": "Draft",
       "locked": "Read-only system plugin",
       "editable": "Editable composition"
     },
+    "inspector": {
+      "about": "About",
+      "settings": "Settings",
+      "toolsExposed": "Tools exposed",
+      "presetContains": "Preset contains",
+      "addToHarness": "Add to harness",
+      "compare": "Compare",
+      "askAi": "Ask AI"
+    },
     "copilot": {
-      "title": "Studio Copilot",
+      "title": "Assistant",
       "askPlaceholder": "Ask anything about active plugins, tools, or dependencies...",
-      "createPlugin": "Create plugin",
-      "marketplace": "Marketplace"
+      "apiKeyRequired": "Assistant API Key Required"
     }
   }
 }

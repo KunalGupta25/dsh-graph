@@ -7,23 +7,39 @@
   "ui": {
     "tabTitle": "工作流工作台",
     "stageChanges": "暂存更改",
-    "applyPatch": "应用补丁",
+    "apply": "应用到 Harness",
     "discard": "放弃",
+    "autoLayout": "自动布局",
+    "fit": "居中对齐",
+    "refresh": "刷新",
+    "marketplace": "插件市场",
+    "changes": "更改记录",
+    "assistant": "AI 助手",
     "nodes": {
       "core": "核心服务",
       "preset": "智能体预设",
-      "hostPlugin": "宿主插件",
-      "uiPlugin": "界面插件",
+      "plugin": "插件",
+      "tool": "工具",
       "mcp": "MCP 服务",
       "skill": "技能",
+      "bundle": "插件包",
+      "draft": "草稿",
       "locked": "只读系统插件",
       "editable": "可编辑编排"
     },
+    "inspector": {
+      "about": "关于",
+      "settings": "设置",
+      "toolsExposed": "导出的工具",
+      "presetContains": "预设包含内容",
+      "addToHarness": "添加到 Harness",
+      "compare": "对比",
+      "askAi": "询问 AI"
+    },
     "copilot": {
-      "title": "工作台助手",
+      "title": "AI 助手",
       "askPlaceholder": "询问有关插件、工具或依赖关系的任何问题...",
-      "createPlugin": "创建插件",
-      "marketplace": "插件市场"
+      "apiKeyRequired": "需要配置助手 API 密钥"
     }
   }
 }
