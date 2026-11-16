@@ -6,6 +6,7 @@ window.__ModuleLoader__.load({
 
     const API = '/api/workflow-studio';
     const MASK = '••••••••';
+    const safeHref = (u) => { try { const url = new URL(u); return url.protocol === 'https:' || url.protocol === 'http:' ? u : ''; } catch { return ''; } };
 
     // ---- Theme: verified DSH tokens from @deepseek-ai/dsh-client-ui-theme ----
     const tv = (name, fb) => `var(--dsw-alias-${name}, ${fb})`;
@@ -229,7 +230,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap' } },
             isMarket && item.installable !== false && h('button', { style: primary(), onClick: () => onStage({ op: 'install', item: item.id, itemData: stripMarket(item), label: `Install ${item.title || item.name}` }) }, 'Add to harness'),
             isMarket && h('button', { style: btn(), onClick: () => onCompare(item) }, inCompare ? 'Remove from compare' : 'Compare'),
-            isMarket && (item.homepage || item.repository) && h('a', { href: item.homepage || item.repository, target: '_blank', rel: 'noopener noreferrer', style: { ...btn(), textDecoration: 'none' } }, 'Open page'),
+            isMarket && safeHref(item.homepage || item.repository) && h('a', { href: safeHref(item.homepage || item.repository), target: '_blank', rel: 'noopener noreferrer', style: { ...btn(), textDecoration: 'none' } }, 'Open page'),
             !isMarket && item.editable !== false && item.bundle && h('button', { style: btn(), onClick: () => onStage({ op: 'toggle', node: item.id, enabled: item.state === 'disabled', label: `${item.state === 'disabled' ? 'Enable' : 'Disable'} ${item.label}` }) }, item.state === 'disabled' ? 'Enable' : 'Disable'),
             !isMarket && item.editable !== false && item.bundle && h('button', { style: btn({ color: C.danger }), onClick: () => onStage({ op: 'remove', node: item.id, label: `Remove ${item.label}` }) }, 'Remove'),
             !isMarket && item.type === 'draft' && h('button', { style: btn({ color: C.danger }), onClick: async () => { await api('/drafts/clean', { id: item.stagedKey || item.id }); onClose(); } }, 'Clean draft files'),
@@ -268,6 +269,20 @@ window.__ModuleLoader__.load({
 
     // ---------- Changes panel ----------
     function Changes({ staged, onUnstage, onApply, applying, results, onClose }) {
+      const [diff, setDiff] = useState(null);
+      const [diffLoading, setDiffLoading] = useState(false);
+      const previewDiff = useCallback(async () => {
+        setDiffLoading(true);
+        try {
+          const changes = staged.map(({ key, label, ...c }) => c);
+          const r = await api('/diff', { baseline: '', staging: changes });
+          setDiff(r.diff || r.text || 'No diff available');
+        } catch (e) {
+          setDiff(`Error: ${e.message}`);
+        } finally {
+          setDiffLoading(false);
+        }
+      }, [staged]);
       return h('div', { style: { position: 'absolute', right: 12, top: 52, width: 380, maxHeight: '70%', overflow: 'auto', background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, zIndex: 20, boxShadow: '0 8px 30px rgba(0,0,0,.4)' } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 8 } }, h('b', { style: { color: C.text } }, `Staged changes (${staged.length})`), h('button', { style: btn({ padding: '1px 7px' }), onClick: onClose }, '×')),
         staged.length === 0 && h('div', { style: { color: C.muted, fontSize: 12 } }, 'Nothing staged. Edit a node or add something from the marketplace.'),
@@ -278,7 +293,10 @@ window.__ModuleLoader__.load({
           s.op === 'install' && s.itemData?.installSpec && h('div', { style: { fontSize: 11, color: C.text2, marginTop: 4 } }, `Installs ${s.itemData.installSpec} (runs third-party code in the Host).`))),
         results && h('div', { style: { marginTop: 8 } }, results.map((r, i) => h('div', { key: i, style: { fontSize: 12, color: r.ok ? C.ok : C.danger, marginBottom: 3 } }, `${r.ok ? '✓' : '✗'} ${r.op}: ${r.ok ? (r.detail || 'done') : r.error}`)),
           results.some((r) => r.ok) && h('div', { style: { fontSize: 11, color: C.text2 } }, 'Package changes may need a restart or a plugin reload to take effect.')),
-        staged.length > 0 && h('button', { style: primary({ marginTop: 6, width: '100%' }), disabled: applying, onClick: onApply }, applying ? 'Applying…' : 'Apply to harness'));
+        staged.length > 0 && h('div', { style: { display: 'flex', gap: 6, marginTop: 6 } },
+          h('button', { style: primary({ flex: 1 }), disabled: applying, onClick: onApply }, applying ? 'Applying…' : 'Apply to harness'),
+          h('button', { style: btn({ flex: 1 }), disabled: diffLoading, onClick: previewDiff }, diffLoading ? 'Preview…' : 'Preview (dry-run)')),
+        diff !== null && h('div', { style: { marginTop: 8, padding: 8, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, maxHeight: 200, overflow: 'auto', fontSize: 11, color: C.text2, whiteSpace: 'pre-wrap', fontFamily: 'monospace' } }, diff));
     }
 
     // ---------- AI panel ----------
@@ -294,7 +312,7 @@ window.__ModuleLoader__.load({
       const endRef = useRef(null);
       const load = useCallback(async () => {
         try { const s = await api('/ai/settings'); setSettings(s); setCfg({ baseUrl: s.baseUrl || '', apiKey: s.apiKey || '' }); } catch { /* ignore */ }
-        try { const m = await api('/ai/models'); setModels(m); setModel((cur) => cur || m.current || 'deepseek-chat'); } catch { /* ignore */ }
+        try { const m = await api('/ai/models'); setModels(m); setModel((cur) => cur || m.current || 'deepseek-flash'); } catch { /* ignore */ }
       }, []);
       useEffect(() => { load(); }, [load]);
       useEffect(() => { endRef.current?.scrollIntoView?.({ block: 'end' }); }, [msgs, busy]);
@@ -329,7 +347,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 6, alignItems: 'center' } },
           h('b', { style: { color: C.text, flex: 1 } }, '✦ Assistant'),
           h('select', { style: input({ width: 130 }), value: model, onChange: (e) => setModel(e.target.value), 'aria-label': 'Model' },
-            (models.models.length ? models.models : [model || 'deepseek-chat']).map((m) => h('option', { key: m, value: m }, m))),
+            (models.models.length ? models.models : [model || 'deepseek-flash']).map((m) => h('option', { key: m, value: m }, m))),
           h('button', { style: btn({ padding: '3px 7px' }), title: 'AI settings', onClick: () => setShowCfg((v) => !v) }, '⚙'),
           h('button', { style: btn({ padding: '3px 7px' }), title: 'Collapse', onClick: () => setOpen(false) }, '»')),
         showCfg && h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}` } },
@@ -337,7 +355,7 @@ window.__ModuleLoader__.load({
           h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Base URL'),
           h('input', { style: input({ marginBottom: 6 }), value: cfg.baseUrl, onChange: (e) => setCfg({ ...cfg, baseUrl: e.target.value }), placeholder: 'https://api.deepseek.com' }),
           h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Model'),
-          h('input', { style: input({ marginBottom: 6 }), value: model, onChange: (e) => setModel(e.target.value), placeholder: 'deepseek-chat' }),
+          h('input', { style: input({ marginBottom: 6 }), value: model, onChange: (e) => setModel(e.target.value), placeholder: 'deepseek-flash' }),
           h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'API Key'),
           h('input', { style: input({ marginBottom: 6 }), type: 'password', autoComplete: 'off', value: cfg.apiKey, onChange: (e) => setCfg({ ...cfg, apiKey: e.target.value }), onFocus: (e) => e.target.select() }),
           h('button', { style: primary(), onClick: async () => { try { const s = await api('/ai/settings', { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model }); setSettings(s); setShowCfg(false); load(); } catch (e) { setMsgs((m) => [...m, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]); } } }, 'Save'),
@@ -411,7 +429,7 @@ window.__ModuleLoader__.load({
         setMLoading(true);
         try { const r = await api('/market', { query: q, kind }); setMItems(r.items || []); setMStatus(r.status || null); setMLinks(r.links || []); } catch (e) { setMStatus({ error: e.message }); } finally { setMLoading(false); }
       }, [q, kind]);
-      useEffect(() => { runMarket(); }, [kind]);
+      useEffect(() => { runMarket(); }, [q, kind]);
 
       // staged installs/scaffolds appear as draft nodes
       const draftNodes = useMemo(() => staged.filter((s) => s.op === 'install' || s.op === 'scaffold').map((s) => ({
@@ -446,7 +464,11 @@ window.__ModuleLoader__.load({
           const changes = staged.map(({ key, label, ...c }) => c);
           const r = await api('/apply', { changes });
           setResults(r.results);
-          setStaged((s) => s.filter((x, i) => !r.results[i]?.ok));
+          setStaged((s) => s.filter((x, i) => {
+            const res = r.results?.[i];
+            // Keep staged item if no corresponding result (length mismatch) or if result indicates failure
+            return !res || res.ok !== true;
+          }));
           refresh();
         } catch (e) { setResults([{ op: 'apply', ok: false, error: e.message }]); } finally { setApplying(false); }
       }, [staged, refresh]);

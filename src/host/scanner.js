@@ -104,7 +104,7 @@ export class CordisGraphScanner {
     }
 
     // 3. Live Loader entries (every plugin row that exists in this process).
-    const entries = this.loaderEntries(sources);
+    const entries = await this.loaderEntries(sources);
     const rows = entries.length ? entries : [...rowMeta.entries()].map(([id, m]) => ({ id, options: { id, name: m.row?.name, config: m.row?.config, disabled: m.row?.disabled }, live: false }));
     for (const entry of rows) {
       const o = entry.options || {};
@@ -190,13 +190,24 @@ export class CordisGraphScanner {
    * Reads entries from the Cordis loader.
    * Verified: In Cordis runtime, loader.entries() is a generator method (*entries()) yielding Entry objects.
    */
-  loaderEntries(sources) {
+  async loaderEntries(sources) {
     let loader;
     try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
     if (!loader) { sources.loader = false; return []; }
     let rawEntries = [];
     if (typeof loader.entries === 'function') {
-      try { rawEntries = [...loader.entries()]; } catch { /* fallback */ }
+      try {
+        const iter = loader.entries();
+        // Handle both sync and async generators
+        if (iter && typeof iter.next === 'function') {
+          // Check if it's an async generator (has [Symbol.asyncIterator])
+          if (iter[Symbol.asyncIterator]) {
+            for await (const e of iter) rawEntries.push(e);
+          } else {
+            for (const e of iter) rawEntries.push(e);
+          }
+        }
+      } catch { /* fallback */ }
     } else if (loader.entries && typeof loader.entries === 'object') {
       rawEntries = Object.values(loader.entries);
     }
@@ -250,13 +261,22 @@ export class CordisGraphScanner {
    * Locate the live Loader entry for a row id.
    * Verified: Iterates loader.entries() generator or fallback map.
    */
-  findEntry(rowId) {
+  async findEntry(rowId) {
     let loader;
     try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
     if (!loader) return undefined;
     let list = [];
     if (typeof loader.entries === 'function') {
-      try { list = [...loader.entries()]; } catch { /* fallback */ }
+      try {
+        const iter = loader.entries();
+        if (iter && typeof iter.next === 'function') {
+          if (iter[Symbol.asyncIterator]) {
+            for await (const e of iter) list.push(e);
+          } else {
+            for (const e of iter) list.push(e);
+          }
+        }
+      } catch { /* fallback */ }
     } else if (loader.entries && typeof loader.entries === 'object') {
       list = Object.values(loader.entries);
     }

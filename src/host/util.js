@@ -37,7 +37,9 @@ export function readBody(req, limit = 2 * 1024 * 1024) {
     req.on('data', (chunk) => {
       size += chunk.length;
       if (size > limit) {
-        reject(new Error('Request body too large'));
+        const err = new Error('Request body too large');
+        err.code = 'BODY_TOO_LARGE';
+        reject(err);
         req.destroy?.();
         return;
       }
@@ -49,7 +51,9 @@ export function readBody(req, limit = 2 * 1024 * 1024) {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch {
-        reject(new Error('Body is not valid JSON'));
+        const err = new Error('Body is not valid JSON');
+        err.code = 'BAD_JSON';
+        reject(err);
       }
     });
   });

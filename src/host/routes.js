@@ -67,7 +67,10 @@ export function createRouter({ ctx, studio, ai, ops }) {
       }
       return sendJson(res, 200, await fn(body));
     } catch (e) {
-      const code = e?.code === 'NO_KEY' ? 400 : 500;
+      let code = 500;
+      if (e?.code === 'NO_KEY') code = 400;
+      else if (e?.code === 'BAD_JSON') code = 400;
+      else if (e?.code === 'BODY_TOO_LARGE') code = 413;
       return sendJson(res, code, { error: e instanceof Error ? e.message : String(e), code: e?.code });
     }
   }

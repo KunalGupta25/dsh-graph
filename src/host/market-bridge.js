@@ -2,6 +2,7 @@ import { callAny } from './util.js';
 
 const TTL = 5 * 60 * 1000;
 const TIMEOUT = 8000;
+const safeHref = (u) => { try { const url = new URL(u); return url.protocol === 'https:' || url.protocol === 'http:' ? u : ''; } catch { return ''; } };
 
 // Real packages shipped for DeepSeek Harness (from the installed-package catalogue). They are
 // always listed so the marketplace is useful offline; installation goes through plugin_manager.
@@ -117,6 +118,40 @@ export class MarketplaceBridge {
   constructor(ctx, options = {}) {
     this.ctx = ctx;
     this.options = options;
+    this._updateApiBase = null;
+  }
+
+  /** Discover dsh-market update API v1 capabilities via GET /dsh-market/api/v1/capabilities */
+  async discoverUpdateApi() {
+    if (this._updateApiBase) return this._updateApiBase;
+    const ws = this.ctx.webServer;
+    if (!ws) return null;
+    // The update API is served at /dsh-market/api/v1 relative to the host
+    try {
+      const res = await fetch('/dsh-market/api/v1/capabilities', { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const caps = await res.json();
+        if (caps && caps.version === 1 && caps.updateApi) {
+          this._updateApiBase = '/dsh-market/api/v1';
+          return this._updateApiBase;
+        }
+      }
+    } catch { /* not available */ }
+    return null;
+  }
+
+  /** Fetch updates from dsh-market update API v1 */
+  async fetchUpdates() {
+    const base = await this.discoverUpdateApi();
+    if (!base) return { items: [], source: 'unavailable' };
+    try {
+      const res = await fetch(`${base}/updates?limit=50`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return { items: data.updates || [], source: 'dsh-market-v1' };
+    } catch (e) {
+      return { items: [], source: 'dsh-market-v1', error: String(e.message || e) };
+    }
   }
 
   async search(query = '', kind = 'all') {
@@ -126,6 +161,14 @@ export class MarketplaceBridge {
     const run = (name, fn) => jobs.push(fn().then((items) => { status[name] = items.length; return items; }).catch((e) => { status[name] = `error: ${e.message}`; return []; }));
 
     run('official', async () => OFFICIAL.filter((i) => matches(i, q)));
+    // Discover and use dsh-market update API v1 if available
+    const updateApi = await this.discoverUpdateApi();
+    if (updateApi && (kind === 'all' || kind === 'plugin')) {
+      run('dsh-market-updates', async () => {
+        const { items } = await this.fetchUpdates();
+        return items.filter((i) => matches(i, q));
+      });
+    }
     if (kind === 'all' || kind === 'plugin' || kind === 'skill' || kind === 'mcp') {
       for (const idx of this.indexes()) run(idx.name, () => this.fromIndex(idx, q));
     }
@@ -178,7 +221,7 @@ export class MarketplaceBridge {
     return list.filter((e) => e && (e.name || e.package)).map((e) => ({
       id: `market:${e.name || e.package}`, kind: 'plugin', source: 'plugin-market', name: e.name || e.package,
       title: e.title || e.name || e.package, description: e.description || '', version: e.version, author: e.author,
-      homepage: e.homepage, installSpec: e.installSpec || e.name || e.package, tags: e.tags || [],
+      homepage: safeHref(e.homepage), installSpec: e.installSpec || e.name || e.package, tags: e.tags || [],
     })).filter((i) => matches(i, q));
   }
 
@@ -187,7 +230,7 @@ export class MarketplaceBridge {
     const data = await getJson(`https://registry.npmjs.org/-/v1/search?text=${text}&size=25`);
     return (data.objects || []).map(({ package: p }) => ({
       id: `npm:${p.name}`, kind, source: 'npm', name: p.name, title: p.name.replace(/^@[^/]+\//, ''), description: p.description || '',
-      version: p.version, author: p.publisher?.username || p.author?.name, homepage: p.links?.homepage || p.links?.npm,
+      version: p.version, author: p.publisher?.username || p.author?.name, homepage: safeHref(p.links?.homepage || p.links?.npm),
       repository: p.links?.repository, installSpec: p.name, tags: p.keywords || [],
     }));
   }
@@ -216,7 +259,7 @@ export class MarketplaceBridge {
       const envVars = (pkg?.environmentVariables || []).map((v) => ({ name: v.name, description: v.description, required: Boolean(v.isRequired), secret: Boolean(v.isSecret) }));
       return {
         id: `mcp:${s.name}`, kind: 'mcp', source: 'mcp-registry', name: s.name, title: (s.title || s.name || '').split('/').pop(),
-        description: s.description || '', version: s.version, homepage: s.websiteUrl || s.repository?.url, repository: s.repository?.url,
+        description: s.description || '', version: s.version, homepage: safeHref(s.websiteUrl || s.repository?.url), repository: s.repository?.url,
         mcp, envVars, installable: Boolean(mcp), tags: ['mcp'],
       };
     });

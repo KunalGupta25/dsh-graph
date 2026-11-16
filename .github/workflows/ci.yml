@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Syntax check (check script)
+        run: npm run check
+
+      - name: Run test suite
+        run: npm test
+
+      - name: Verify package exports
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            console.log('Package name:', pkg.name);
+            console.log('Version:', pkg.version);
+            console.log('Exports:', JSON.stringify(pkg.exports, null, 2));
+          "
+
+  preflight:
+    runs-on: ubuntu-latest
+    needs: check-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Preflight check
+        run: npm run prepack

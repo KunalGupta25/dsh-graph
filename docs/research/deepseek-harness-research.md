@@ -20,6 +20,59 @@ Unlike monolithic AI agent frameworks that hardcode execution loops, prompt stra
 * **Package Manager:** `pnpm` monorepo (`packages/*/*`, `apps/*`)
 * **Primary Language:** TypeScript (NodeNext / ESM, target ES2022)
 
+### Verified 2026-11-16 Findings
+
+#### DeepSeek API (Live Model IDs)
+* **`deepseek-flash`** (V4.1-Flash-1017) — 1M context, 384K max output, JSON output, tool calls, vision supported
+* **`deepseek-v4-pro`** (V4-Pro-0813) — 1M context, 384K max output, JSON output, tool calls
+* **Retired (2026-07-24):** `deepseek-chat` / `deepseek-reasoner` — **do not use**
+* **V3.2-Speciale:** Temporary endpoint expired 2025-12-15
+
+#### API Details (Verified 2026-11-16)
+* **Base:** `https://api.deepseek.com` (OpenAI format) or `/anthropic`; beta `https://api.deepseek.com/beta`
+* **Auth:** `Authorization: Bearer <key>`
+* **Thinking:** **ON by default**; `thinking: { type: 'enabled' | 'disabled' }`; `reasoning_effort: none|low|high|max` (default high)
+* **Max tokens:** 1–384K (8K non-thinking, 64K thinking, 128K at max); temperature ignored in thinking mode
+* **Response:** `message.content` AND `message.reasoning_content` (same level); `message.tool_calls`
+* **When `tools` present:** `reasoning_content` MUST be echoed back on every subsequent turn — omitting it returns HTTP 400
+* **Errors:** `{"error":{message,type,param,code}}`; HTTP 400/401/402/408/413/422/429/500/503/504
+* **Concurrency:** 2500 (flash) / 500 (pro); 429 on excess; `user_id` gives KV-cache/scheduling isolation
+* **Keep-alive:** Empty lines (non-stream) or `: keep-alive` SSE comments
+
+#### Self-Hosting / "Build" Options
+* **Open weights MIT:** V4-Pro (1.6T/49B), V4-Flash (284B/13B), V4.1-Flash-1017
+* **vLLM & SGLang** support DeepSeek-V4/V4.1
+* **Ollama:** V4-Pro/V4-Flash mods available
+* **GGUF quants:** unsloth/DeepSeek-V4.1-Flash-1017-GGUF → llama.cpp-family support plausible
+* All expose OpenAI-compatible `/v1/chat/completions`; auth optional locally
+
+#### dsh-market v1 Update API (Beta — Discover via Capabilities)
+* **Envelope:** `dsh-market/update-api/v1`
+* **Capabilities:** `GET /dsh-market/api/v1/capabilities` → `{ version: 1, updateApi: true }`
+* **Routes:** `GET /updates/summary`, `GET|POST /updates`, `GET /operations`, `POST /rollback`, `POST /restart`
+* **Limit:** `MAX_UPDATE_OPERATIONS_V1 = 50`
+* **Exports:** `UPDATE_API_V1_SCHEMA`, `UpdateOperationStoreV1`
+* **Integration:** Discover via capabilities, never hardcode; keep public-index fallbacks; optional GitHub token
+
+#### Cordis Plugin Framework Constraints (DSH)
+* **Manifest:** `cordis.patch.yml` with `insert: [{ id, name, config }]`
+* **Host entry:** `export const inject = { required: [...], optional: [...] }; export const Config = {...}; export function apply(ctx, config) {...}`
+* **Client entry:** `export const inject = ['slots', 'locale', 'theme']; export function apply(ctx) { ctx.slots.inject(...) }`
+* **Client packaging:** `dsh.client.inject: ["@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-theme"]`
+* **Preflight:** `preflight.mjs` enforces patch inserts package name, client.js loader-id prefix, top-level icon path/type/≤256KB/packaged, lockfile resolves only registry.npmjs.org
+
+#### dsh-market AGENTS.md = Hard Constraint (Chinese)
+* 自然 / 好理解 / 面向普通用户
+* Errors: what happened + why + what to do now
+* Say 不知道 rather than plausible filler
+* Defaults are the product
+* Progressive disclosure
+* Reversible actions need no confirmation
+* Every action needs immediate reaction + landing point
+* zh/en copy parity
+* Never expose internals (`bundle`, `profile`, `disable-carrier`, `ctx.${key}`, `rowId`)
+* No steps for impossible errors
+
 ---
 
 ## 2. Core Architectural Pillars

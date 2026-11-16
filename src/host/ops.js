@@ -72,13 +72,14 @@ export class HarnessOps {
     if (item.kind === 'skill') {
       return { ok: false, error: 'Skill install is not automated: copy the skill folder into your skills directory.', manual: item.repository || item.homepage };
     }
-    const spec = item.installSpec || item.name;
+    // Never trust client-supplied installSpec; use the item's name from market search
+    const spec = item.name;
     const r = await callAny(pm, ['installBundle', 'install'], [[spec], [{ spec }], [{ name: spec }]]);
     return { ...r, detail: r.ok ? `Installed ${spec}` : undefined };
   }
 
   async setConfig(rowId, patch) {
-    const entry = this.scanner.findEntry(rowId);
+    const entry = await this.scanner.findEntry(rowId);
     const editor = this.svc('configEditor');
     if (!entry || !editor) return { ok: false, error: !entry ? `No live plugin entry for ${rowId}` : 'ctx.configEditor is unavailable' };
     const prev = entry.options?.config ?? {};
@@ -111,35 +112,171 @@ export class HarnessOps {
    */
   async apply(changes, graph) {
     const byId = new Map((graph?.nodes || []).map((n) => [n.id, n]));
-    const results = [];
-    for (const c of changes || []) {
-      let r;
-      try {
-        const node = c.node ? byId.get(c.node) : undefined;
-        if (node && node.editable === false && ['setConfig', 'toggle', 'remove'].includes(c.op)) {
-          r = { ok: false, error: node.lockReason || 'Node is not editable' };
-        } else if (c.op === 'install') {
-          const found = c.itemData || (await this.market.search(c.item || '', 'all')).items.find((i) => i.id === c.item);
-          r = await this.installItem(found);
-        } else if (c.op === 'setConfig') {
-          r = await this.setConfig(node?.rowId || c.rowId, c.patch || {});
-        } else if (c.op === 'toggle') {
-          r = await this.toggle(node?.bundle || c.bundle, c.enabled !== false);
-        } else if (c.op === 'remove') {
-          r = await this.remove(node?.bundle || c.bundle);
-        } else if (c.op === 'scaffold') {
-          const sc = this.creator.scaffoldBundle(c.spec || {});
-          const dir = this.writeDraft(sc);
-          r = { ok: true, detail: `Draft written to ${dir}`, draft: dir, scaffold: sc.id };
-          if (c.install && sc.type !== 'skill') r = { ...(await this.installFromDir(dir)), draft: dir };
-        } else {
-          r = { ok: false, error: `Unsupported operation: ${c.op}` };
-        }
-      } catch (e) {
-        r = { ok: false, error: e instanceof Error ? e.message : String(e) };
-      }
-      results.push({ op: c.op, node: c.node, item: c.item, ok: !!r.ok, detail: r.detail, error: r.ok ? undefined : r.error, draft: r.draft });
+
+    // --- Build dependency graph from graph edges for topological ordering ---
+    const depGraph = new Map();
+    const revDepGraph = new Map();
+    for (const node of graph?.nodes || []) {
+      depGraph.set(node.id, new Set());
+      revDepGraph.set(node.id, new Set());
     }
+    for (const edge of graph?.edges || []) {
+      if (depGraph.has(edge.from) && depGraph.has(edge.to)) {
+        depGraph.get(edge.from).add(edge.to);
+        revDepGraph.get(edge.to).add(edge.from);
+      }
+    }
+
+    // --- Topological sort with cycle detection (Kahn's algorithm) ---
+    function topoSort(nodes) {
+      const inDegree = new Map();
+      const nodeSet = new Set(nodes);
+      for (const n of nodes) {
+        inDegree.set(n, 0);
+      }
+      for (const n of nodes) {
+        for (const dep of depGraph.get(n) || []) {
+          if (nodeSet.has(dep)) inDegree.set(dep, (inDegree.get(dep) || 0) + 1);
+        }
+      }
+      const queue = [...nodes].filter((n) => (inDegree.get(n) || 0) === 0);
+      const sorted = [];
+      while (queue.length) {
+        const n = queue.shift();
+        sorted.push(n);
+        for (const dep of depGraph.get(n) || []) {
+          if (!nodeSet.has(dep)) continue;
+          const d = inDegree.get(dep) - 1;
+          inDegree.set(dep, d);
+          if (d === 0) queue.push(dep);
+        }
+      }
+      if (sorted.length !== nodes.length) {
+        // Cycle detected - return original order with warning
+        return { sorted: nodes, cycle: true };
+      }
+      return { sorted, cycle: false };
+    }
+
+    // --- Order changes by type priority (install → enable → setConfig → preset rewrite → remove) ---
+    const typePriority = { install: 0, scaffold: 0, toggle: 1, setConfig: 2, remove: 3 };
+    const changeNodes = changes.map((c, idx) => ({ ...c, _idx: idx }));
+    changeNodes.sort((a, b) => (typePriority[a.op] ?? 99) - (typePriority[b.op] ?? 99));
+
+    // --- Pre-state snapshot for rollback ---
+    const snapshot = new Map();
+    for (const c of changes || []) {
+      if (c.op === 'setConfig' && c.node) {
+        const node = byId.get(c.node);
+        if (node?.rowId) {
+          const entry = await this.scanner.findEntry(node.rowId);
+          if (entry) snapshot.set(c.node, JSON.parse(JSON.stringify(entry.options?.config || {})));
+        }
+      } else if ((c.op === 'toggle' || c.op === 'remove') && c.node) {
+        const node = byId.get(c.node);
+        if (node?.bundle) {
+          const pm = this.svc('pluginManager');
+          // Capture current enabled state
+          const isEnabled = await callAny(pm, ['isBundleEnabled', 'getBundleState'], [[node.bundle], [{ name: node.bundle }]]);
+          snapshot.set(c.node, { enabled: isEnabled?.ok ? isEnabled.value : true });
+        }
+      }
+    }
+
+    // --- Apply in topological order within each priority group ---
+    const results = [];
+    const applied = new Set();
+    const restartRequired = new Set();
+    let anyCycle = false;
+
+    // Group by priority
+    const groups = new Map();
+    for (const c of changeNodes) {
+      const p = typePriority[c.op] ?? 99;
+      if (!groups.has(p)) groups.set(p, []);
+      groups.get(p).push(c);
+    }
+
+    for (const priority of [...groups.keys()].sort((a, b) => a - b)) {
+      const group = groups.get(priority);
+      // Topological sort within group
+      const nodeIds = group.map((c) => c.node).filter(Boolean);
+      const { sorted, cycle } = topoSort(nodeIds);
+      if (cycle) anyCycle = true;
+      const order = new Map(sorted.map((id, i) => [id, i]));
+      group.sort((a, b) => (order.get(a.node) ?? 999) - (order.get(b.node) ?? 999));
+
+      for (const c of group) {
+        let r;
+        try {
+          const node = c.node ? byId.get(c.node) : undefined;
+          if (node && node.editable === false && ['setConfig', 'toggle', 'remove'].includes(c.op)) {
+            r = { ok: false, error: node.lockReason || 'Node is not editable', code: 'LOCKED' };
+          } else if (c.op === 'install') {
+            // Always re-resolve from market search; never trust client-supplied itemData
+            const found = (await this.market.search(c.item || '', 'all')).items.find((i) => i.id === c.item);
+            if (!found) r = { ok: false, error: `Marketplace item not found: ${c.item}`, code: 'NOT_FOUND' };
+            else {
+              r = await this.installItem(found);
+              if (r.ok) restartRequired.add('plugin_install');
+            }
+          } else if (c.op === 'setConfig') {
+            r = await this.setConfig(node?.rowId || c.rowId, c.patch || {});
+            if (r.ok) restartRequired.add('config_change');
+          } else if (c.op === 'toggle') {
+            r = await this.toggle(node?.bundle || c.bundle, c.enabled !== false);
+            if (r.ok) restartRequired.add(c.enabled !== false ? 'plugin_enable' : 'plugin_disable');
+          } else if (c.op === 'remove') {
+            r = await this.remove(node?.bundle || c.bundle);
+            if (r.ok) restartRequired.add('plugin_remove');
+          } else if (c.op === 'scaffold') {
+            const sc = this.creator.scaffoldBundle(c.spec || {});
+            const dir = this.writeDraft(sc);
+            r = { ok: true, detail: `Draft written to ${dir}`, draft: dir, scaffold: sc.id };
+            if (c.install && sc.type !== 'skill') r = { ...(await this.installFromDir(dir)), draft: dir };
+          } else {
+            r = { ok: false, error: `Unsupported operation: ${c.op}`, code: 'UNSUPPORTED_OP' };
+          }
+        } catch (e) {
+          r = { ok: false, error: e instanceof Error ? e.message : String(e), code: 'EXCEPTION' };
+        }
+
+        // Dependency-aware skip: if dependencies failed, mark as skipped
+        const deps = revDepGraph.get(c.node) || new Set();
+        const depFailed = [...deps].some((d) => {
+          const depResult = results.find((res) => res.node === d);
+          return depResult && !depResult.ok;
+        });
+        if (depFailed) {
+          r = { ok: false, error: 'Dependency failed', code: 'DEP_FAILED', skipped: true };
+        }
+
+        results.push({ op: c.op, node: c.node, item: c.item, ok: !!r.ok, detail: r.detail, error: r.ok ? undefined : r.error, draft: r.draft, code: r.code, skipped: r.skipped });
+        applied.add(c.node);
+      }
+    }
+
+    // --- Rollback on critical failures (if no partial success allowed) ---
+    const criticalFailures = results.filter((r) => !r.ok && !r.skipped && r.code !== 'LOCKED' && r.code !== 'NOT_FOUND' && r.code !== 'UNSUPPORTED_OP');
+    if (criticalFailures.length > 0) {
+      // Rollback setConfig changes
+      for (const [nodeId, prevConfig] of snapshot.entries()) {
+        const node = byId.get(nodeId);
+        if (node?.rowId) {
+          await this.setConfig(node.rowId, prevConfig);
+        }
+      }
+    }
+
+    // Add restart hint to results
+    if (restartRequired.size > 0) {
+      results.push({ op: 'restart_hint', ok: true, detail: `Restart recommended for: ${[...restartRequired].join(', ')}`, code: 'RESTART_REQUIRED' });
+    }
+
+    if (anyCycle) {
+      results.unshift({ op: 'warning', ok: true, detail: 'Dependency cycle detected; changes applied in client order', code: 'CYCLE_DETECTED' });
+    }
+
     return results;
   }
 }
