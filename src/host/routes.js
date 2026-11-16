@@ -83,7 +83,7 @@ export function createRouter({ ctx, studio, ai, ops }) {
  * Verified: ws.register({ kind, path, handler }) signature matches @deepseek-ai/dsh-host-webserver/lib/index.js.
  */
 export function registerRoutes(ctx, router) {
-  const ws = ctx.webServer;
+  const ws = ctx.get('webServer');
   if (!ws?.register) return { ok: false, dispose() {} };
   const disposers = [];
   for (const kind of ['exact', 'prefix']) {

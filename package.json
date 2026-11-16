@@ -23,6 +23,12 @@
     "check": "node --check index.js && node --check src/host/ai.js && node --check src/host/ops.js && node --check src/host/routes.js && node --check src/host/util.js && node --check src/host/scanner.js && node --check src/host/market-bridge.js && node --check src/host/patcher.js && node --check src/host/creator-engine.js",
     "prepack": "npm run check && npm run test"
   },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

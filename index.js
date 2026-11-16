@@ -5,25 +5,20 @@ import { CreatorEngine } from './src/host/creator-engine.js';
 import { AiBackend } from './src/host/ai.js';
 import { HarnessOps } from './src/host/ops.js';
 import { createRouter, registerRoutes } from './src/host/routes.js';
+import z from '@deepseek-ai/schemastery';
 
-// tools is required; webServer is optional so the agent tools still work without the browser UI.
-export const inject = { required: ['tools'], optional: ['webServer', 'pluginManager', 'pluginMarket', 'configEditor'] };
+// All services are read lazily via ctx.get() so the plugin activates in any profile.
+export const inject = {};
 
-export const Config = {
-  type: 'object',
-  properties: {
-    enabled: { type: 'boolean', default: true },
-    ai: {
-      type: 'object',
-      properties: {
-        baseUrl: { type: 'string', description: 'OpenAI-compatible base URL' },
-        model: { type: 'string' },
-      },
-    },
-    skillRoots: { type: 'array', items: { type: 'string' }, description: 'Extra directories to scan for skills' },
-    marketIndexes: { type: 'array', items: { type: 'string' }, description: 'Extra https:// plugin catalog index URLs (JSON) to include in the Marketplace' },
-  },
-};
+export const Config = z.object({
+  enabled: z.boolean().loose(),
+  ai: z.object({
+    baseUrl: z.string().loose(),
+    model: z.string().loose(),
+  }).loose(),
+  skillRoots: z.array(z.string()).loose(),
+  marketIndexes: z.array(z.string()).loose(),
+}).loose();
 
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return;
@@ -50,8 +45,10 @@ export function apply(ctx, config = {}) {
   const routes = registerRoutes(ctx, createRouter({ ctx, studio, ai, ops }));
   ctx.on?.('dispose', routes.dispose);
 
-  if (ctx.tools?.register) {
-    ctx.tools.register({
+  // Lazy-load tools service; only register agent tools if available
+  const tools = ctx.get('tools');
+  if (tools?.register) {
+    tools.register({
       name: 'dsh_workflow_studio_graph',
       description: 'Lists plugins, MCP connections, skills, presets and core services of this harness as graph nodes.',
       parameters: { type: 'object', properties: {} },
@@ -65,7 +62,7 @@ export function apply(ctx, config = {}) {
       },
     });
 
-    ctx.tools.register({
+    tools.register({
       name: 'dsh_workflow_studio_market',
       description: 'Searches community sources (npm, GitHub topics, MCP registry, plugin market) for DSH plugins, MCP servers and skills.',
       parameters: {
@@ -87,7 +84,7 @@ export function apply(ctx, config = {}) {
       },
     });
 
-    ctx.tools.register({
+    tools.register({
       name: 'dsh_workflow_studio_scaffold',
       description: 'Generates (without installing) a DSH bundle: host-tool, decoration, mcp, preset or skill. Returns the files.',
       parameters: {

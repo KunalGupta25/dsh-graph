@@ -21,8 +21,8 @@ describe('routes', () => {
       apply: async () => [],
     };
     const mockCtx = {
+      get: mock.fn((key) => key === 'webServer' ? { register: () => () => {} } : undefined),
       connection: { requestRejection: () => false },
-      webServer: { register: () => () => {} },
       on: () => {},
     };
 
@@ -33,7 +33,8 @@ describe('routes', () => {
 
   test('registerRoutes handles missing webServer', () => {
     const router = createRouter({ ctx: {}, studio: {}, ai: {}, ops: {} });
-    const result = registerRoutes({}, router);
+    const mockCtx = { get: () => undefined };
+    const result = registerRoutes(mockCtx, router);
     assert.strictEqual(result.ok, false);
     assert.strictEqual(typeof result.dispose, 'function');
   });
