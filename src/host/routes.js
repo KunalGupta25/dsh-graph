@@ -43,7 +43,7 @@ export function createRouter({ ctx, studio, ai, ops }) {
 
   async function handle(req, res) {
     try {
-      const rejection = ctx.connection?.requestRejection?.(req);
+      const rejection = ctx.get('connection')?.requestRejection?.(req);
       if (rejection) return sendJson(res, 403, { error: 'Forbidden' });
       const url = new URL(req.url || '/', 'http://localhost');
       const sub = url.pathname.startsWith(BASE) ? url.pathname.slice(BASE.length) || '/' : url.pathname;
