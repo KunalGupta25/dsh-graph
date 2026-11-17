@@ -50,7 +50,7 @@ export class CordisGraphScanner {
 
   svc(key) {
     try {
-      return this.ctx.get?.(key) ?? this.ctx[key];
+      return typeof this.ctx.get === 'function' ? this.ctx.get(key) : this.ctx[key];
     } catch {
       return undefined;
     }
@@ -192,7 +192,7 @@ export class CordisGraphScanner {
    */
   async loaderEntries(sources) {
     let loader;
-    try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
+    try { loader = typeof this.ctx.get === 'function' ? this.ctx.get('loader') : this.ctx.loader; } catch { /* unavailable */ }
     if (!loader) { sources.loader = false; return []; }
     let rawEntries = [];
     if (typeof loader.entries === 'function') {
@@ -263,7 +263,7 @@ export class CordisGraphScanner {
    */
   async findEntry(rowId) {
     let loader;
-    try { loader = this.ctx.loader ?? this.ctx.get?.('loader'); } catch { /* unavailable */ }
+    try { loader = typeof this.ctx.get === 'function' ? this.ctx.get('loader') : this.ctx.loader; } catch { /* unavailable */ }
     if (!loader) return undefined;
     let list = [];
     if (typeof loader.entries === 'function') {

@@ -59,18 +59,54 @@ window.__ModuleLoader__.load({
 
     // ---- Layout: n8n-style multi-tier columns with sub-column wrapping to prevent vertical spikes or stacking ----
     const TIER = { core: 0, preset: 1, bundle: 1, plugin: 2, tool: 2, mcp: 3, skill: 4, draft: 4 };
+
+    // ---- Declutter: built-in plugins are hidden by default, and big families collapse into one group node ----
+    const GROUP_MIN = 4; // a family with fewer nodes than this is never collapsed
+    const GROUPS = {
+      'client-ui': 'Client UI', builtin: 'Built-in plugins', mcp: 'MCP connections', skill: 'Skills',
+      'tools-files': 'File & workspace tools', 'tools-shell': 'Shell tools', 'tools-web': 'Web tools',
+      'tools-office': 'Office tools', 'tools-agents': 'Agent & task tools', 'tools-other': 'Other tools',
+    };
+    // Tools are grouped by purpose, judged from the package name (first match wins).
+    const TOOL_CATS = [
+      ['shell', /shell|bash|powershell|terminal|exec|command/],
+      ['web', /web|fetch|browser|http|url|internet/],
+      ['office', /office|docx|pdf|xlsx|pptx|sheet|slide|document/],
+      ['agents', /agent|task|todo|plan|workflow|schedule|goal|team|memory/],
+      ['files', /file|fs|workspace|edit|read|write|glob|grep|search|find|patch|dependenc/],
+    ];
+    const toolCategory = (n) => {
+      const p = String(n.package || '').toLowerCase().replace(/^.*\/dsh-(tool|command)-/, '');
+      for (const [k, re] of TOOL_CATS) if (re.test(p)) return k;
+      return 'other';
+    };
+    // 'tools' is the cluster hanging off the Tool registry; the '@reg' variants are that cluster's purpose groups.
+    const ALL_GROUP_KEYS = [...Object.keys(GROUPS), ...Object.keys(GROUPS).filter((k) => k.startsWith('tools-')).map((k) => `${k}@reg`), 'tools'];
+    // Shipped / infrastructure plugins you cannot change anyway. Presets, MCP, skills, core services, bundles and drafts always stay visible.
+    const isBuiltin = (n) => !['core', 'draft', 'bundle', 'skill', 'mcp', 'preset', 'group'].includes(n.type)
+      && !n.parent && n.package !== '@local/dsh-workflow-studio'
+      && (n.origin === 'shipped' || n.editable === false);
+    const isShippedTool = (n) => n.type === 'tool' && !n.parent && (n.origin === 'shipped' || n.editable === false);
+    const groupKey = (n) => {
+      if (n.parent) return `preset:${n.parent}`; // members of a preset form one group per preset
+      if (n.type === 'skill' || n.type === 'mcp') return n.type;
+      if (n.type === 'tool') return `tools-${toolCategory(n)}`;
+      if (n.type === 'plugin' && /dsh-client-/.test(n.package || '')) return 'client-ui';
+      if (n.type === 'plugin' && isBuiltin(n)) return 'builtin';
+      return null;
+    };
     function autoLayout(nodes) {
       const cols = {};
       for (const n of nodes) {
-        const tier = TIER[n.type] ?? 2;
+        const tier = n.tier ?? TIER[n.type] ?? 2;
         (cols[tier] ||= []).push(n);
       }
       const pos = {};
       let colOffset = 0;
-      for (let t = 0; t <= 4; t++) {
+      for (const t of Object.keys(cols).map(Number).sort((a, b) => a - b)) {
         const list = cols[t] || [];
         if (!list.length) continue;
-        const maxPerCol = 6;
+        const maxPerCol = list.every((n) => n.memberOf) ? list.length : 6; // children of an open group stay in one column
         list.forEach((n, i) => {
           const subCol = Math.floor(i / maxPerCol);
           const row = i % maxPerCol;
@@ -80,6 +116,16 @@ window.__ModuleLoader__.load({
           };
         });
         colOffset += Math.ceil(list.length / maxPerCol);
+      }
+      // Children of an open group line up with their group (same row, one column to its right), stacked group by group.
+      const cursor = {};
+      for (const g of nodes.filter((n) => n.type === 'group' && n.expanded).sort((a, b) => pos[a.id].y - pos[b.id].y)) {
+        const kids = nodes.filter((n) => n.memberOf === g.id);
+        if (!kids.length) continue;
+        const col = kids[0].tier;
+        let y = Math.max(pos[g.id].y, cursor[col] ?? -Infinity);
+        for (const m of kids) { pos[m.id] = { x: pos[m.id].x, y }; y += NH + 32; }
+        cursor[col] = y;
       }
       return pos;
     }
@@ -116,12 +162,33 @@ window.__ModuleLoader__.load({
     }, text);
 
     // ---------- Node card (n8n-style with input/output port dots) ----------
-    function NodeCard({ n, pos, selected, onDown, onClick }) {
+    function NodeCard({ n, pos, selected, onDown, onClick, onHover, onCluster }) {
+      if (n.type === 'group') {
+        const gc = (TYPE[n.members[0]?.type] || TYPE.bundle).c;
+        const dot = (side) => h('span', { style: { position: 'absolute', [side]: -6, top: '50%', marginTop: -5, width: 10, height: 10, borderRadius: '50%', background: C.surface, border: `2px solid ${gc}`, pointerEvents: 'none' } });
+        return h('div', {
+          onPointerDown: (e) => onDown(e, n), onClick: (e) => { e.stopPropagation(); onClick(n); },
+          onPointerEnter: () => onHover?.(n.id), onPointerLeave: () => onHover?.(null),
+          title: n.expanded ? 'Click to collapse this group' : `Click to show the ${n.count} nodes in this group`,
+          style: {
+            position: 'absolute', left: pos.x, top: pos.y, width: NW, height: NH, boxSizing: 'border-box', cursor: 'pointer',
+            background: C.surface, borderRadius: 10, padding: '8px 12px', userSelect: 'none',
+            border: `1px dashed ${selected ? C.accent : gc}`, borderLeft: `5px solid ${gc}`,
+            boxShadow: n.expanded ? '0 2px 6px rgba(0,0,0,.25)' : `5px 5px 0 -1px ${C.surface2}, 9px 9px 0 -2px ${C.border}`,
+          },
+        },
+          dot('left'), dot('right'),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'space-between' } },
+            h('span', { style: { color: C.text, fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, `${n.label} (${n.count})`),
+            h('span', { style: { color: gc, fontSize: 12 } }, n.expanded ? '\u25be' : '\u25b8')),
+          h('div', { style: { display: 'flex', gap: 5, marginTop: 6 } }, Badge(n.expanded ? 'click to collapse' : 'click to expand', gc)));
+      }
       const t = TYPE[n.type] || TYPE.plugin;
       const locked = n.editable === false;
       const dim = n.state === 'disabled';
       return h('div', {
         onPointerDown: (e) => onDown(e, n), onClick: (e) => { e.stopPropagation(); onClick(n); },
+        onPointerEnter: () => onHover?.(n.id), onPointerLeave: () => onHover?.(null),
         title: locked ? (n.lockReason || 'Read-only') : 'Editable',
         style: {
           position: 'absolute', left: pos.x, top: pos.y, width: NW, height: NH, boxSizing: 'border-box', cursor: 'grab',
@@ -140,7 +207,11 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: 5, marginTop: 5, alignItems: 'center' } },
           Badge(t.l, t.c),
           n.state && n.state !== 'active' && Badge(n.state, n.state === 'error' ? C.danger : C.warn),
-          n.tools && Badge(`${n.tools.length} tools`, C.text2)),
+          n.tools && Badge(`${n.tools.length} tools`, C.text2),
+          n.cluster && h('button', {
+            style: btn({ padding: '0 6px', fontSize: 10 }), title: n.cluster.open ? 'Hide the shipped tool packages' : 'Show the shipped tool packages next to the registry',
+            onPointerDown: (e) => e.stopPropagation(), onClick: (e) => { e.stopPropagation(); onCluster?.(); },
+          }, `${n.cluster.open ? '\u25be' : '\u25b8'} ${n.cluster.count} tool packages`)),
         h('div', { style: { color: C.muted, fontSize: 10, marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, n.package || ''));
     }
 
@@ -304,15 +375,21 @@ window.__ModuleLoader__.load({
       const [msgs, setMsgs] = useState([]);
       const [text, setText] = useState('');
       const [busy, setBusy] = useState(false);
-      const [models, setModels] = useState({ models: [], current: '' });
-      const [model, setModel] = useState('');
-      const [settings, setSettings] = useState(null);
-      const [showCfg, setShowCfg] = useState(false);
-      const [cfg, setCfg] = useState({ baseUrl: '', apiKey: '' });
+      const [providers, setProviders] = useState([]);
+      const [sel, setSel] = useState({ provider: '', model: '' });
+      const [loadingModels, setLoadingModels] = useState(false);
       const endRef = useRef(null);
       const load = useCallback(async () => {
-        try { const s = await api('/ai/settings'); setSettings(s); setCfg({ baseUrl: s.baseUrl || '', apiKey: s.apiKey || '' }); } catch { /* ignore */ }
-        try { const m = await api('/ai/models'); setModels(m); setModel((cur) => cur || m.current || 'deepseek-flash'); } catch { /* ignore */ }
+        setLoadingModels(true);
+        try {
+          const m = await api('/ai/models');
+          setProviders(m.providers || []);
+          setSel((cur) => ((m.providers || []).some((p) => p.id === cur.provider) ? cur : (m.current || { provider: '', model: '' })));
+        } catch { /* the panel shows its empty state */ } finally { setLoadingModels(false); }
+      }, []);
+      const choose = useCallback((next) => {
+        setSel(next);
+        api('/ai/settings', next).catch(() => { /* the choice still applies until the panel is closed */ });
       }, []);
       useEffect(() => { load(); }, [load]);
       useEffect(() => { endRef.current?.scrollIntoView?.({ block: 'end' }); }, [msgs, busy]);
@@ -322,16 +399,15 @@ window.__ModuleLoader__.load({
         setMsgs(next); setText(''); setBusy(true);
         try {
           const r = await api('/ai/chat', {
-            messages: next, model,
+            messages: next, provider: sel.provider, model: sel.model,
             selected: selected ? { id: selected.id, label: selected.label || selected.title, package: selected.package || selected.name } : null,
             market: (market || []).filter(Boolean).map(stripMarket),
           });
           setMsgs([...next, { role: 'assistant', content: r.text || '(no text)', actions: r.actions || [], model: r.model }]);
         } catch (e) {
           setMsgs([...next, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]);
-          if (/key/i.test(e.message)) setShowCfg(true);
         } finally { setBusy(false); }
-      }, [msgs, busy, model, selected, market]);
+      }, [msgs, busy, sel, selected, market]);
       useEffect(() => { if (seed && open) { send(seed); clearSeed(); } }, [seed, open]);
       if (!open) return h('button', { style: btn({ position: 'absolute', right: 12, bottom: 12, zIndex: 10 }), onClick: () => setOpen(true) }, '✦ AI');
       const describe = (a) => {
@@ -346,35 +422,20 @@ window.__ModuleLoader__.load({
       return h('div', { style: { width: 340, background: C.surface, borderLeft: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0 } },
         h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}`, display: 'flex', gap: 6, alignItems: 'center' } },
           h('b', { style: { color: C.text, flex: 1 } }, '✦ Assistant'),
-          h('select', { style: input({ width: 130 }), value: model, onChange: (e) => setModel(e.target.value), 'aria-label': 'Model' },
-            (models.models.length ? models.models : [model || 'deepseek-flash']).map((m) => h('option', { key: m, value: m }, m))),
-          h('button', { style: btn({ padding: '3px 7px' }), title: 'AI settings', onClick: () => setShowCfg((v) => !v) }, '⚙'),
+          h('select', {
+            style: input({ width: 170 }), 'aria-label': 'Provider and model', disabled: !providers.length,
+            value: sel.provider ? JSON.stringify([sel.provider, sel.model]) : '',
+            onChange: (e) => { try { const [provider, model] = JSON.parse(e.target.value); choose({ provider, model }); } catch { /* ignore */ } },
+          },
+            !providers.length && h('option', { value: '' }, loadingModels ? 'Loading…' : 'No providers'),
+            providers.map((p) => h('optgroup', { key: p.id, label: p.name || p.id },
+              (p.models?.length ? p.models : (sel.provider === p.id && sel.model ? [{ id: sel.model, name: sel.model }] : [])).map((m) => h('option', { key: `${p.id}/${m.id}`, value: JSON.stringify([p.id, m.id]) }, `${p.id}/${m.id}`))))),
+          h('button', { style: btn({ padding: '3px 7px' }), title: 'Reload providers and models', onClick: load }, loadingModels ? '…' : '↻'),
           h('button', { style: btn({ padding: '3px 7px' }), title: 'Collapse', onClick: () => setOpen(false) }, '»')),
-        showCfg && h('div', { style: { padding: 10, borderBottom: `1px solid ${C.border}` } },
-          h('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, settings?.hasKey ? `API key set (${settings.keySource}).` : 'No API key set. DeepSeek is the default provider.'),
-          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Base URL'),
-          h('input', { style: input({ marginBottom: 6 }), value: cfg.baseUrl, onChange: (e) => setCfg({ ...cfg, baseUrl: e.target.value }), placeholder: 'https://api.deepseek.com' }),
-          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'Model'),
-          h('input', { style: input({ marginBottom: 6 }), value: model, onChange: (e) => setModel(e.target.value), placeholder: 'deepseek-flash' }),
-          h('label', { style: { display: 'block', fontSize: 11, color: C.muted, marginBottom: 2 } }, 'API Key'),
-          h('input', { style: input({ marginBottom: 6 }), type: 'password', autoComplete: 'off', value: cfg.apiKey, onChange: (e) => setCfg({ ...cfg, apiKey: e.target.value }), onFocus: (e) => e.target.select() }),
-          h('button', { style: primary(), onClick: async () => { try { const s = await api('/ai/settings', { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model }); setSettings(s); setShowCfg(false); load(); } catch (e) { setMsgs((m) => [...m, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]); } } }, 'Save'),
-          h('div', { style: { fontSize: 10, color: C.muted, marginTop: 6 } }, 'Default is DeepSeek (https://api.deepseek.com). Settings are stored locally with owner-only permissions.')),
         h('div', { style: { flex: 1, overflow: 'auto', padding: 10 } },
-          !settings?.hasKey && h('div', { style: { margin: '0 0 10px', padding: 10, borderRadius: 8, background: `${C.warn}18`, border: `1px solid ${C.warn}50` } },
-            h('div', { style: { fontWeight: 600, color: C.warn, fontSize: 12, marginBottom: 4 } }, 'Assistant API Key Required'),
-            h('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, 'Enter an API key (DeepSeek or OpenRouter) to enable chat:'),
-            h('div', { style: { display: 'flex', gap: 6 } },
-              h('input', { style: input({ flex: 1 }), type: 'password', placeholder: 'sk-...', value: cfg.apiKey, onChange: (e) => setCfg({ ...cfg, apiKey: e.target.value }) }),
-              h('button', { style: primary({ flexShrink: 0, padding: '4px 10px' }), onClick: async () => {
-                try {
-                  const s = await api('/ai/settings', { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model });
-                  setSettings(s);
-                  load();
-                } catch (e) {
-                  setMsgs((m) => [...m, { role: 'assistant', content: `⚠ ${e.message}`, error: true }]);
-                }
-              } }, 'Save Key'))),
+          !loadingModels && providers.length === 0 && h('div', { style: { margin: '0 0 10px', padding: 10, borderRadius: 8, background: `${C.warn}18`, border: `1px solid ${C.warn}50` } },
+            h('div', { style: { fontWeight: 600, color: C.warn, fontSize: 12, marginBottom: 4 } }, 'No model provider available'),
+            h('div', { style: { fontSize: 11, color: C.text2 } }, 'The assistant uses the providers configured on the dsh Models settings page. Add one there, then press ↻.')),
           msgs.length === 0 && h('div', { style: { color: C.muted, fontSize: 12, lineHeight: 1.5 } },
             'Ask about your harness, compare marketplace items, or have me design a plugin, MCP connection or skill. Changes I propose are only staged; you review and apply them.',
             h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, marginTop: 10 } },
@@ -415,6 +476,13 @@ window.__ModuleLoader__.load({
       const [results, setResults] = useState(null);
       const [seed, setSeed] = useState('');
       const [filter, setFilter] = useState('');
+      const [showBuiltin, setShowBuiltin] = useState(() => lsGet('dsh-studio-builtin', false));
+      const [expanded, setExpanded] = useState(() => new Set(lsGet('dsh-studio-expanded', [])));
+      const [edgeMode, setEdgeMode] = useState(() => lsGet('dsh-studio-edges', 'faint')); // faint | all | focus
+      const [hover, setHover] = useState(null);
+      const [fitTick, setFitTick] = useState(0);
+      const [viewAnim, setViewAnim] = useState(false);
+      const animTimer = useRef(null);
       const wrap = useRef(null);
       const drag = useRef(null);
 
@@ -435,11 +503,132 @@ window.__ModuleLoader__.load({
       const draftNodes = useMemo(() => staged.filter((s) => s.op === 'install' || s.op === 'scaffold').map((s) => ({
         id: `draft:${s.key}`, label: s.op === 'install' ? (s.itemData?.title || s.item) : (s.spec?.title || s.spec?.name), type: 'draft', package: s.op === 'install' ? s.itemData?.name : s.spec?.type, editable: true, state: 'staged', description: 'Staged, not applied yet.', stagedKey: s.key,
       })), [staged]);
-      const allNodes = useMemo(() => [...graph.nodes, ...draftNodes], [graph, draftNodes]);
+      const filterActive = filter.trim() !== '';
+      // The graph that is actually drawn: filtered, with built-ins hidden and large families collapsed into group nodes.
+      const vg = useMemo(() => {
+        const base = [...graph.nodes, ...draftNodes];
+        const f = filter.trim().toLowerCase();
+        if (f) {
+          const nodes = base.filter((n) => `${n.label} ${n.package} ${n.type}`.toLowerCase().includes(f));
+          const ids = new Set(nodes.map((n) => n.id));
+          return { nodes, edges: graph.edges.filter((e) => ids.has(e.from) && ids.has(e.to)), rep: (id) => id, hidden: base.length - nodes.length, hiddenBuiltin: 0, groupCount: 0 };
+        }
+        // Shipped tool packages hang off the Tool registry: collapsed behind a counter on that node, shown beside it when opened.
+        const hasRegistry = base.some((n) => n.id === 'core:tools');
+        const clusterIds = hasRegistry ? new Set(base.filter(isShippedTool).map((n) => n.id)) : new Set();
+        const toolsOpen = expanded.has('tools');
+        const visible = base.filter((n) => (clusterIds.has(n.id) ? toolsOpen : (showBuiltin || !isBuiltin(n))))
+          .map((n) => (n.parent ? { ...n, tier: 1.5 } : clusterIds.has(n.id) ? { ...n, tier: 0.5 } : n.id === 'core:tools' && clusterIds.size ? { ...n, cluster: { count: clusterIds.size, open: toolsOpen } } : n));
+        const groupLabel = (k) => (k.startsWith('preset:') ? `${base.find((x) => x.id === k.slice(7))?.label || 'Preset'}\u2019s Tools` : GROUPS[k.split('@')[0]]);
+        const minFor = (k) => (k.startsWith('tools-') || k.startsWith('preset:') ? 3 : GROUP_MIN);
+        const buckets = {};
+        for (const n of visible) { const k0 = groupKey(n); const k = k0 && clusterIds.has(n.id) ? `${k0}@reg` : k0; if (k) (buckets[k] ||= []).push(n); }
+        const repMap = {}; const collapsed = new Set(); const groupNodes = []; const repAll = {}; const childOf = {};
+        for (const [k, list] of Object.entries(buckets)) {
+          if (list.length < minFor(k)) continue;
+          const gid = `group:${k}`; const open = expanded.has(k);
+          const gTier = list[0].tier ?? TIER[list[0].type] ?? 2;
+          groupNodes.push({ id: gid, type: 'group', groupKey: k, label: groupLabel(k), count: list.length, expanded: open, members: list, tier: gTier });
+          for (const n of list) {
+            repAll[n.id] = gid; // links to a member always go through its group, open or not
+            if (!open) { repMap[n.id] = gid; collapsed.add(n.id); } else childOf[n.id] = { gid, tier: gTier + 0.25 };
+          }
+        }
+        const rep = (id) => repMap[id] || id;
+        const ids = new Set(visible.map((n) => n.id));
+        const merged = new Map();
+        for (const e of graph.edges) {
+          if (!ids.has(e.from) || !ids.has(e.to)) continue;
+          const a = repAll[e.from] || e.from, b = repAll[e.to] || e.to;
+          if (a === b) continue;
+          const id = `${a}->${b}`;
+          const prev = merged.get(id);
+          if (!prev) merged.set(id, { id, from: a, to: b, kind: e.kind });
+          else if (e.kind !== 'tools') prev.kind = e.kind;
+        }
+        // An open group keeps its own links and becomes the parent of its children.
+        for (const g of groupNodes) if (g.expanded) for (const m of g.members) merged.set(`${g.id}->${m.id}`, { id: `${g.id}->${m.id}`, from: g.id, to: m.id, kind: 'composition' });
+        return {
+          nodes: [...groupNodes, ...visible.filter((n) => !collapsed.has(n.id)).map((n) => (childOf[n.id] ? { ...n, tier: childOf[n.id].tier, memberOf: childOf[n.id].gid } : n))], edges: [...merged.values()], rep,
+          hidden: base.length - visible.length, hiddenBuiltin: showBuiltin ? 0 : base.filter((n) => !clusterIds.has(n.id) && isBuiltin(n)).length, groupCount: groupNodes.length,
+        };
+      }, [graph, draftNodes, filter, showBuiltin, expanded]);
+      const allNodes = vg.nodes;
       const auto = useMemo(() => autoLayout(allNodes), [allNodes]);
-      const cleanPos = useMemo(() => sanitizePositions(pos, allNodes), [pos, allNodes]);
+      // Dragged positions are remembered, but while filtering everything is re-packed so results are never scattered.
+      const cleanPos = useMemo(() => (filterActive ? {} : sanitizePositions(pos, allNodes)), [pos, allNodes, filterActive]);
       const P = (id) => cleanPos[id] || auto[id] || { x: 0, y: 0 };
-      const shown = useMemo(() => { const f = filter.trim().toLowerCase(); return f ? new Set(allNodes.filter((n) => `${n.label} ${n.package} ${n.type}`.toLowerCase().includes(f)).map((n) => n.id)) : null; }, [filter, allNodes]);
+      const expandedKey = [...expanded].sort().join(',');
+      useEffect(() => { if (!loading) setFitTick((t) => t + 1); }, [showBuiltin, filterActive, filter]);
+      useEffect(() => { if (fitTick) fit(); }, [fitTick]);
+      // Expanding or collapsing never refits the canvas. The clicked node is pinned to the same spot on screen instead,
+      // so everything else shifts around it and you keep your place.
+      const anchor = useRef(null);
+      React.useLayoutEffect(() => {
+        const a = anchor.current; if (!a) return;
+        anchor.current = null;
+        const p = P(a.id);
+        viewTween.current = { fromX: view.x, fromY: view.y, toX: a.sx - p.x * view.k, toY: a.sy - p.y * view.k };
+      }, [expandedKey]);
+
+      // ---- Smooth motion: nodes slide to their new place (links follow), new ones grow out of their parent, closing ones fly back into it.
+      // The view moves in step with the nodes, so the node you clicked stays exactly where it was on screen.
+      const [shownPos, setShownPos] = useState({});
+      const [ghosts, setGhosts] = useState([]);
+      const shownRef = useRef({});
+      const prevNodes = useRef([]);
+      const rafRef = useRef(0);
+      const viewTween = useRef(null);
+      const targetKey = allNodes.map((n) => { const p = P(n.id); return `${n.id}:${Math.round(p.x)},${Math.round(p.y)}`; }).join('|');
+      React.useLayoutEffect(() => {
+        cancelAnimationFrame(rafRef.current);
+        const target = {};
+        for (const n of allNodes) target[n.id] = P(n.id);
+        const vt = viewTween.current; viewTween.current = null;
+        const prev = prevNodes.current; prevNodes.current = allNodes;
+        const from = shownRef.current;
+        const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduce || drag.current?.type === 'node' || !Object.keys(from).length) {
+          shownRef.current = target; setShownPos(target); setGhosts([]);
+          if (vt) setView((v) => ({ ...v, x: vt.toX, y: vt.toY }));
+          return;
+        }
+        const curIds = new Set(allNodes.map((n) => n.id));
+        const spawn = (n) => (n.memberOf && from[n.memberOf]) || (n.tier === 0.5 && from['core:tools']) || (n.parent && from[n.parent]) || target[n.id];
+        const dest = (n) => {
+          const k = n.parent ? `preset:${n.parent}` : groupKey(n);
+          const g = k && [`group:${k}@reg`, `group:${k}`].find((id) => target[id]);
+          return g || (n.tier === 0.5 && target['core:tools'] ? 'core:tools' : null);
+        };
+        const ghostList = prev.filter((n) => !curIds.has(n.id) && n.type !== 'group' && from[n.id]).map((n) => ({ n, to: dest(n) })).filter((g) => g.to);
+        setGhosts(ghostList);
+        const origin = {};
+        for (const n of allNodes) origin[n.id] = from[n.id] || spawn(n);
+        for (const g of ghostList) origin[g.n.id] = from[g.n.id];
+        const t0 = performance.now(); const dur = 340;
+        const frame = (now) => {
+          const t = Math.min(1, (now - t0) / dur); const e = 1 - (1 - t) ** 3;
+          const cur = {};
+          for (const n of allNodes) { const o = origin[n.id], p = target[n.id]; cur[n.id] = { x: o.x + (p.x - o.x) * e, y: o.y + (p.y - o.y) * e }; }
+          for (const g of ghostList) { const o = origin[g.n.id], p = target[g.to]; cur[g.n.id] = { x: o.x + (p.x - o.x) * e, y: o.y + (p.y - o.y) * e }; }
+          shownRef.current = t >= 1 ? target : cur;
+          setShownPos(shownRef.current);
+          if (vt) setView((v) => ({ ...v, x: vt.fromX + (vt.toX - vt.fromX) * e, y: vt.fromY + (vt.toY - vt.fromY) * e }));
+          if (t < 1) rafRef.current = requestAnimationFrame(frame); else setGhosts([]);
+        };
+        frame(t0);
+      }, [targetKey, expandedKey]);
+      useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+      const S = (id) => shownPos[id] || P(id);
+      const toggleGroup = (k, anchorId) => {
+        if (anchorId) { const p = P(anchorId); anchor.current = { id: anchorId, sx: view.x + p.x * view.k, sy: view.y + p.y * view.k }; }
+        setExpanded((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); lsSet('dsh-studio-expanded', [...n]); return n; });
+      };
+      const setAllGroups = (open) => setExpanded(() => {
+        const n = open ? new Set([...ALL_GROUP_KEYS, ...graph.nodes.filter((x) => x.parent).map((x) => `preset:${x.parent}`)]) : new Set();
+        lsSet('dsh-studio-expanded', [...n]); return n;
+      });
+      const cycleEdges = () => setEdgeMode((m) => { const n = m === 'faint' ? 'all' : m === 'all' ? 'focus' : 'faint'; lsSet('dsh-studio-edges', n); return n; });
 
       const stage = useCallback((c) => {
         if (c.op === 'unstage') { setStaged((s) => s.filter((x) => x.key !== c.key)); return; }
@@ -510,25 +699,41 @@ window.__ModuleLoader__.load({
       };
       const onBgDown = (e) => { if (e.button > 1) return; e.preventDefault(); startDrag({ type: 'pan', sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y }); };
       const onNodeDown = (e, n) => { if (e.button !== 0) return; e.stopPropagation(); e.preventDefault(); const p = P(n.id); startDrag({ type: 'node', id: n.id, sx: e.clientX, sy: e.clientY, ox: p.x, oy: p.y, k: view.k }); };
-      const fit = useCallback(() => {
+      const fit = useCallback((instant) => {
         const r = wrap.current?.getBoundingClientRect(); if (!r || !allNodes.length) return;
         const xs = allNodes.map((n) => P(n.id)); const minX = Math.min(...xs.map((p) => p.x)), maxX = Math.max(...xs.map((p) => p.x + NW)), minY = Math.min(...xs.map((p) => p.y)), maxY = Math.max(...xs.map((p) => p.y + NH));
         const k = Math.min(1.2, Math.max(0.3, Math.min(r.width / (maxX - minX + 80), r.height / (maxY - minY + 80))));
+        if (instant !== true) { setViewAnim(true); clearTimeout(animTimer.current); animTimer.current = setTimeout(() => setViewAnim(false), 450); }
         setView({ k, x: (r.width - (maxX - minX) * k) / 2 - minX * k, y: (r.height - (maxY - minY) * k) / 2 - minY * k });
       }, [allNodes, cleanPos, auto]);
-      useEffect(() => { if (!loading && graph.nodes.length) fit(); }, [loading]);
+      useEffect(() => { if (!loading && graph.nodes.length) fit(true); }, [loading]);
 
+      // Forget dragged positions so the automatic layout applies to the nodes that are currently shown.
       const resetLayout = () => {
-        const fresh = autoLayout(allNodes);
-        setPos(fresh);
-        lsSet('dsh-studio-pos', fresh);
-        setTimeout(fit, 60);
+        setPos({});
+        lsSet('dsh-studio-pos', {});
+        setFitTick((t) => t + 1);
       };
 
-      const selectNode = (n) => setSel(n.type === 'draft' ? { ...n } : n);
+      const selectNode = (n) => {
+        if (n.type === 'group') { if (!moved.current) toggleGroup(n.groupKey, n.id); return; }
+        setSel(n.type === 'draft' ? { ...n } : n);
+      };
       const selectedNode = sel && !sel.__market ? (allNodes.find((n) => n.id === sel.id) || sel) : sel;
+      // Focus: the selected node (or the one under the pointer) lights up its own connections; the rest stays quiet.
+      const visibleIds = new Set(allNodes.map((n) => n.id));
+      const selFocus = selectedNode && !selectedNode.__market && visibleIds.has(vg.rep(selectedNode.id)) ? vg.rep(selectedNode.id) : null;
+      const focusId = hover || selFocus;
+      const neighbors = new Set();
+      if (selFocus) {
+        neighbors.add(selFocus);
+        for (const e of vg.edges) { if (e.from === selFocus) neighbors.add(e.to); if (e.to === selFocus) neighbors.add(e.from); }
+      }
+      const isHot = (e) => Boolean(focusId) && (e.from === focusId || e.to === focusId);
+      // Registry -> tool links carry no information, so they only appear when the registry or a tool is hovered or selected.
+      const edgesToDraw = vg.edges.filter((e) => (edgeMode !== 'focus' || isHot(e)) && (e.kind !== 'tools' || isHot(e))).sort((a, b) => Number(isHot(a)) - Number(isHot(b)));
       const edgePath = (e) => {
-        const a = P(e.from), b = P(e.to);
+        const a = S(e.from), b = S(e.to);
         // Connect from right port of source node to left port of target node
         const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
         const dx = Math.max(40, Math.abs(x2 - x1) / 2);
@@ -540,6 +745,7 @@ window.__ModuleLoader__.load({
       const degraded = ['pluginManager', 'loader'].filter((k) => src[k] === false);
 
       return h('div', { style: { position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: C.bg, color: C.text, fontFamily: 'inherit' } },
+        h('style', null, '@keyframes dswIn{from{opacity:0}} @keyframes dswOut{to{opacity:0}}'),
         h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', padding: '8px 12px', borderBottom: `1px solid ${C.border}`, background: C.surface } },
           h('b', { style: { fontSize: 14 } }, 'Workflow Studio'),
           h('input', { style: input({ width: 200 }), placeholder: 'Filter nodes…', value: filter, onChange: (e) => setFilter(e.target.value) }),
@@ -547,6 +753,15 @@ window.__ModuleLoader__.load({
           h('button', { style: btn(), onClick: resetLayout }, 'Auto Layout'),
           h('button', { style: btn(), onClick: fit }, 'Fit'),
           h('button', { style: btn({ background: marketOpen ? C.surface2 : C.surface }), onClick: () => setMarketOpen((v) => !v) }, 'Marketplace'),
+          h('button', {
+            style: btn({ background: showBuiltin ? C.accent : C.surface2, color: showBuiltin ? '#fff' : C.text }), disabled: filterActive,
+            title: 'Built-in plugins ship with dsh and are mostly read-only. They are hidden by default.',
+            onClick: () => setShowBuiltin((v) => { lsSet('dsh-studio-builtin', !v); return !v; }),
+          }, showBuiltin ? 'Built-in: shown' : `Built-in: hidden${vg.hiddenBuiltin ? ` (${vg.hiddenBuiltin})` : ''}`),
+          h('button', { style: btn(), disabled: filterActive, title: 'Collapse or expand all groups', onClick: () => setAllGroups(vg.groupCount > 0 && allNodes.some((n) => n.type === 'group' && !n.expanded)) },
+            allNodes.some((n) => n.type === 'group' && !n.expanded) ? 'Expand groups' : 'Collapse groups'),
+          h('button', { style: btn(), title: 'faint: all connections dimmed. all: every connection. selected only: just the hovered or selected node.', onClick: cycleEdges },
+            `Edges: ${edgeMode === 'focus' ? 'selected only' : edgeMode}`),
           h('span', { style: { flex: 1 } }),
           degraded.length > 0 && h('span', { style: { fontSize: 11, color: C.warn }, title: 'Some harness services could not be read; the graph may be incomplete.' }, `⚠ partial data (${degraded.join(', ')})`),
           h('button', { style: staged.length ? primary() : btn(), onClick: () => setShowChanges((v) => !v) }, `Changes${staged.length ? ` (${staged.length})` : ''}`)),
@@ -555,17 +770,23 @@ window.__ModuleLoader__.load({
           marketOpen && h(Market, { onPick: (i) => setSel({ ...i, __market: true }), selectedId: sel?.__market ? sel.id : null, items: mItems, status: mStatus, loading: mLoading, kind, setKind, query: q, setQuery: setQ, run: runMarket, compare, links: mLinks }),
           h('div', {
             ref: wrap, onPointerDown: onBgDown, onClick: () => { if (!moved.current) setSel(null); },
-            style: { flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab', userSelect: 'none', backgroundImage: `radial-gradient(${C.border} 1px, transparent 1px)`, backgroundSize: `${20 * view.k}px ${20 * view.k}px`, backgroundPosition: `${view.x}px ${view.y}px` },
+            style: { flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab', userSelect: 'none', backgroundImage: `radial-gradient(${C.border} 1px, transparent 1px)`, backgroundSize: `${20 * view.k}px ${20 * view.k}px`, backgroundPosition: `${view.x}px ${view.y}px`, transition: viewAnim ? 'background-position 0.4s ease, background-size 0.4s ease' : 'none' },
           },
-            h('div', { style: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', transform: `translate(${view.x}px,${view.y}px) scale(${view.k})` } },
+            h('div', { style: { position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', transform: `translate(${view.x}px,${view.y}px) scale(${view.k})`, transition: viewAnim ? 'transform 0.4s ease' : 'none' } },
               h('svg', { width: 1, height: 1, style: { position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' } },
-                graph.edges.map((e) => h('path', { key: e.id, d: edgePath(e), fill: 'none', stroke: C.muted, strokeWidth: 1.5, opacity: shown && !(shown.has(e.from) && shown.has(e.to)) ? 0.1 : 0.7 }))),
-              allNodes.map((n) => h('div', { key: n.id, style: { opacity: shown && !shown.has(n.id) ? 0.2 : 1 } }, h(NodeCard, { n, pos: P(n.id), selected: selectedNode?.id === n.id, onDown: onNodeDown, onClick: selectNode })))),
+                edgesToDraw.map((e) => {
+                  const hot = isHot(e);
+                  return h('path', { key: e.id, d: edgePath(e), fill: 'none', stroke: hot ? C.accent : C.muted, strokeWidth: hot ? 2.2 : (edgeMode === 'all' ? 1.5 : 1), opacity: hot ? 1 : (edgeMode === 'all' ? 0.6 : 0.1), style: { transition: 'opacity 0.2s, stroke 0.2s', animation: 'dswIn 0.4s ease' } });
+                })),
+              allNodes.map((n) => h('div', { key: n.id, style: { opacity: selFocus && edgeMode !== 'all' && !neighbors.has(n.id) ? 0.3 : 1, transition: 'opacity 0.15s', animation: 'dswIn 0.35s ease' } },
+                h(NodeCard, { n, pos: S(n.id), selected: selFocus === n.id || selectedNode?.id === n.id, onDown: onNodeDown, onClick: selectNode, onHover: setHover, onCluster: () => toggleGroup('tools', 'core:tools') }))),
+              ghosts.map((g) => h('div', { key: `ghost:${g.n.id}`, style: { animation: 'dswOut 0.34s ease forwards', pointerEvents: 'none' } },
+                h(NodeCard, { n: g.n, pos: S(g.n.id), selected: false, onDown: () => {}, onClick: () => {} })))),
             h('div', { onPointerDown: (e) => e.stopPropagation(), onClick: (e) => e.stopPropagation(), style: { position: 'absolute', left: 12, bottom: 12, display: 'flex', gap: 4, zIndex: 5 } },
               h('button', { style: btn({ padding: '3px 9px' }), title: 'Zoom out', onClick: () => zoomBy(1 / 1.25) }, '−'),
               h('button', { style: btn({ padding: '3px 9px' }), title: 'Zoom in', onClick: () => zoomBy(1.25) }, '+'),
               h('button', { style: btn({ padding: '3px 9px' }), title: 'Fit to screen', onClick: fit }, '⤢')),
-            !loading && allNodes.length === 0 && h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: C.muted, fontSize: 13 } }, 'No nodes found. Check that the harness services are available.')),
+            !loading && allNodes.length === 0 && h('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: C.muted, fontSize: 13 } }, filterActive ? 'No nodes match the filter.' : 'No nodes found. Check that the harness services are available.')),
           selectedNode && h(Inspector, { sel: selectedNode, staged, onStage: stage, onClose: () => setSel(null), onAsk: (p) => { setAiOpen(true); setSeed(p); }, inCompare: compare.includes(selectedNode.id), onCompare: toggleCompare }),
           h(AiPanel, { open: aiOpen, setOpen: setAiOpen, selected: selectedNode, market: compareItems.length ? compareItems : mItems.slice(0, 15), onStageAction: stageAction, seed, clearSeed: () => setSeed(''), compareItems }),
           showChanges && h(Changes, { staged, onUnstage: (key) => stage({ op: 'unstage', key }), onApply: apply, applying, results, onClose: () => setShowChanges(false) })));

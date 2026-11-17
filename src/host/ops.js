@@ -16,7 +16,7 @@ export class HarnessOps {
   }
 
   svc(key) {
-    try { return this.ctx.get?.(key) ?? this.ctx[key]; } catch { return undefined; }
+    try { return typeof this.ctx.get === 'function' ? this.ctx.get(key) : this.ctx[key]; } catch { return undefined; }
   }
 
   draftDir(id) {

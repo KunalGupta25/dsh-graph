@@ -124,7 +124,7 @@ export class MarketplaceBridge {
   /** Discover dsh-market update API v1 capabilities via GET /dsh-market/api/v1/capabilities */
   async discoverUpdateApi() {
     if (this._updateApiBase) return this._updateApiBase;
-    const ws = this.ctx.webServer;
+    const ws = typeof this.ctx.get === 'function' ? this.ctx.get('webServer') : this.ctx.webServer;
     if (!ws) return null;
     // The update API is served at /dsh-market/api/v1 relative to the host
     try {
@@ -214,7 +214,7 @@ export class MarketplaceBridge {
   }
 
   async fromPluginMarket(q) {
-    const market = this.ctx.get?.('pluginMarket') ?? this.ctx.pluginMarket;
+    const market = typeof this.ctx.get === 'function' ? this.ctx.get('pluginMarket') : this.ctx.pluginMarket;
     const res = await callAny(market, ['search', 'list', 'listEntries', 'entries', 'getEntries'], [[{ query: q }], [q], []]);
     if (!res.ok) throw new Error(res.error || 'market service unavailable');
     const list = Array.isArray(res.value) ? res.value : res.value?.entries || res.value?.items || [];

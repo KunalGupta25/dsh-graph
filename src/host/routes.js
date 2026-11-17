@@ -2,6 +2,9 @@ import { readBody, sendJson } from './util.js';
 
 export const BASE = '/api/workflow-studio';
 
+// Errors caused by the request or by missing setup (no provider, no credential), not by this plugin.
+const CLIENT_ERRORS = new Set(['NO_KEY', 'BAD_JSON', 'NO_PROVIDER', 'NO_ADAPTER', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'AUTH']);
+
 /**
  * HTTP API used by the Studio client. Registered through the documented `ctx.webServer.register`
  * (exact + prefix). Requests are checked with `ctx.connection.requestRejection` when available,
@@ -25,7 +28,8 @@ export function createRouter({ ctx, studio, ai, ops }) {
         description: String(n.description || '').slice(0, 160),
       }));
       return ai.chat(Array.isArray(b.messages) ? b.messages : [], {
-        model: b.model,
+        provider: typeof b.provider === 'string' ? b.provider : undefined,
+        model: typeof b.model === 'string' ? b.model : undefined,
         context: { nodes: compact, selected: b.selected || null, market: (b.market || []).slice(0, 25) },
       });
     },
@@ -68,9 +72,10 @@ export function createRouter({ ctx, studio, ai, ops }) {
       return sendJson(res, 200, await fn(body));
     } catch (e) {
       let code = 500;
-      if (e?.code === 'NO_KEY') code = 400;
-      else if (e?.code === 'BAD_JSON') code = 400;
+      if (CLIENT_ERRORS.has(e?.code)) code = 400;
       else if (e?.code === 'BODY_TOO_LARGE') code = 413;
+      else if (e?.code === 'RATE_LIMIT') code = 429;
+      else if (e?.code === 'TIMEOUT') code = 504;
       return sendJson(res, code, { error: e instanceof Error ? e.message : String(e), code: e?.code });
     }
   }
